@@ -4,16 +4,18 @@ using UnityEngine;
 namespace ThreeOS
 {
     /// <summary>
-    /// Blittable mirrors of core <c>threeos_abi.h</c> (Phase 0.2; layout freeze from 0.1).
+    /// Blittable mirrors of core <c>threeos_abi.h</c> (Phase 0.3; layout freeze from 0.1).
     /// Kernel space is OpenXR right-handed Y-up, meters. Convert at the host boundary.
     /// </summary>
     public static class InteropStructs
     {
-        public const uint AbiVersion = 2;
+        public const uint AbiVersion = 3;
         public const int InputFrameBytes = 192;
         public const int TransformDeltaBytes = 48;
         public const int DomeStateBytes = 48;
         public const int DoubleProxyStateBytes = 64;
+        public const int KineticStateBytes = 48;
+        public const int StickDebugBytes = 64;
 
         public static void AssertLayout()
         {
@@ -21,10 +23,14 @@ namespace ThreeOS
             var deltaSize = Marshal.SizeOf<InteropTransformDelta>();
             var domeSize = Marshal.SizeOf<InteropDomeState>();
             var proxySize = Marshal.SizeOf<InteropDoubleProxyState>();
+            var kineticSize = Marshal.SizeOf<InteropKineticState>();
+            var stickDebugSize = Marshal.SizeOf<InteropStickDebug>();
             Debug.Assert(inputSize == InputFrameBytes, $"InteropInputFrame size {inputSize} != {InputFrameBytes}");
             Debug.Assert(deltaSize == TransformDeltaBytes, $"InteropTransformDelta size {deltaSize} != {TransformDeltaBytes}");
             Debug.Assert(domeSize == DomeStateBytes, $"InteropDomeState size {domeSize} != {DomeStateBytes}");
             Debug.Assert(proxySize == DoubleProxyStateBytes, $"InteropDoubleProxyState size {proxySize} != {DoubleProxyStateBytes}");
+            Debug.Assert(kineticSize == KineticStateBytes, $"InteropKineticState size {kineticSize} != {KineticStateBytes}");
+            Debug.Assert(stickDebugSize == StickDebugBytes, $"InteropStickDebug size {stickDebugSize} != {StickDebugBytes}");
         }
 
         /// <summary>Unity left-handed Y-up → OpenXR right-handed Y-up.</summary>
@@ -175,5 +181,53 @@ namespace ThreeOS
         public float scaleRatio;
         public ThreeOSAabb farAabb;
         public ThreeOSAabb nearAabb;
+    }
+
+    [System.Flags]
+    public enum TransformFlags : uint
+    {
+        None = 0,
+        Portal = 1 << 0,
+        Kinematic = 1 << 1,
+        FloorClamp = 1 << 2,
+    }
+
+    public enum KineticPhase : uint
+    {
+        Idle = 0,
+        Possessed = 1,
+        Coasting = 2,
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropKineticState
+    {
+        public ulong entityId;
+        public uint phase;
+        public float velX;
+        public float velY;
+        public float velZ;
+        public float floorY;
+        public uint reserved0;
+        public uint reserved1;
+        public uint reserved2;
+        public uint reserved3;
+        public uint reserved4;
+    }
+
+    /// <summary>Kernel stick-velocity debug ray (OpenXR meters). Host draws only.</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropStickDebug
+    {
+        public uint active;
+        public uint inDeadzone;
+        public float magnitude;
+        public float unused0;
+        public ThreeOSVec3 stick;
+        public ThreeOSVec3 rayOrigin;
+        public ThreeOSVec3 rayTip;
+        public uint reserved0;
+        public uint reserved1;
+        public uint reserved2;
     }
 }

@@ -88,14 +88,14 @@ Core 0.0 ──► Core 0.1 (small ABI freeze) ──► Core 0.2 … ──► 
 **Pairs with:** Core 0.3  
 **Goal:** Feel rate-control and floor clamp.
 
-- [ ] **Task U3.1: `ThreeOSMovable`**
-  - [ ] Component registers targets with kernel; applies velocity/transform deltas from native.
-- [ ] **Task U3.2: Possession UX**
-  - [ ] Hover/select via proxy cursor; possess → wrist micro-motion glides; release coasts.
-- [ ] **Task U3.3: Floor debug**
-  - [ ] Align Unity floor plane with core floor height; confirm clamp (no underground objects).
+- [x] **Task U3.1: `ThreeOSMovable`**
+  - [x] Component registers targets with kernel; applies velocity/transform deltas from native.
+- [x] **Task U3.2: Possession UX**
+  - [x] Hover/select via proxy cursor; possess → wrist micro-motion glides; release coasts.
+- [x] **Task U3.3: Floor debug**
+  - [x] Align Unity floor plane with core floor height; confirm clamp (no underground objects).
 
-**Quest gate:** Possess object, glide across room with small wrist motion, release with coast; object rests on floor.
+**Quest gate:** Possess object, glide across room with small wrist motion, release with coast; object rests on floor — **pending device run**.
 
 ---
 
@@ -160,6 +160,22 @@ Core 0.0 ──► Core 0.1 (small ABI freeze) ──► Core 0.2 … ──► 
   - [ ] Wall masking correct.
   - [ ] Storage glyphs + rename via host text.
   - [ ] Layout toggle + one anchor-mode switch in-session.
+
+---
+
+### 📝 Post-1.0: Parking lot (ideas without tasks yet)
+
+Use this section for design notes, UX instincts, and “we’ll need this later” observations that are **not** ready to become checklist tasks. No ownership, no sequencing — just capture the thought so it is not lost. When an item is ready to plan, promote it into a dated phase (or a new post-1.0 milestone) with real tasks and a Quest/headless gate.
+
+**How to add a note**
+
+- One bullet per idea; optional one-line “why / context.”
+- Prefer product intent over implementation detail.
+- If core must own part of it, mirror a short pointer in core’s Post-1.0 section.
+
+**Notes**
+
+- **Selection-gated telekinesis (far-field keep-alive).** Grip today both possesses and drives; releasing grip drops possession, so resting a hand after a long telekinesis throw loses control. Intended model: telekinesis is a short-distance drive on a *selected* object. Deselect disables it; while selected, grab can re-drive immediately even from far away (no re-acquire). Full OS would also allow parking a voodoo volume on the object, but selection→drive is the fast path so users are not forced into “move → voodoo → move → voodoo” for far-field play. *(Felt on Quest during 0.3 stick-velocity testing.)*
 
 ---
 

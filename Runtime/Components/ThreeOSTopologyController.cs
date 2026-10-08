@@ -62,19 +62,27 @@ namespace ThreeOS
                 OpenLattices(frame.head);
             }
 
-            if (grab && !_grabWasDown)
+            // Portal grab only while lattices are open; otherwise kinematics owns grip.
+            if (LatticeActive)
             {
-                BeginHold();
-            }
+                if (grab && !_grabWasDown)
+                {
+                    BeginHold();
+                }
 
-            if (_holding && grab)
-            {
-                FollowAim(frame);
-            }
+                if (_holding && grab)
+                {
+                    FollowAim(frame);
+                }
 
-            if (!grab && _grabWasDown && _holding)
+                if (!grab && _grabWasDown && _holding)
+                {
+                    EndHoldPortal();
+                }
+            }
+            else if (_holding)
             {
-                EndHoldPortal();
+                _holding = false;
             }
 
             _menuWasDown = menu;

@@ -10,6 +10,7 @@ namespace ThreeOS
         private ThreeOSBridge _bridge;
         private ThreeOSInputRouter _inputRouter;
         private ThreeOSTopologyController _topology;
+        private ThreeOSKinematicsController _kinematics;
         private TextMesh _label;
         private Transform _follow;
 
@@ -19,6 +20,8 @@ namespace ThreeOS
             _inputRouter = GetComponent<ThreeOSInputRouter>() ?? FindFirstObjectByType<ThreeOSInputRouter>();
             _topology = GetComponent<ThreeOSTopologyController>() ??
                         FindFirstObjectByType<ThreeOSTopologyController>();
+            _kinematics = GetComponent<ThreeOSKinematicsController>() ??
+                          FindFirstObjectByType<ThreeOSKinematicsController>();
             CreateWorldHud();
         }
 
@@ -81,17 +84,20 @@ namespace ThreeOS
             var ticksOk = _inputRouter != null && _inputRouter.LastTickOk;
             var flags = _inputRouter != null ? _inputRouter.LastFrame.trackingFlags : 0u;
             var topo = _topology != null
-                ? $"Dome:{_topology.DomeActive} Lattice:{_topology.LatticeActive}\nPortals:{_topology.PortalCount} {_topology.Status}"
+                ? $"Dome:{_topology.DomeActive} Lattice:{_topology.LatticeActive} Portals:{_topology.PortalCount}"
                 : "Topology: n/a";
+            var kin = _kinematics != null
+                ? $"Kinetic:{_kinematics.Phase} {_kinematics.Status}"
+                : "Kinematics: n/a";
             var text =
-                "3OS Phase 0.2\n" +
+                "3OS Phase 0.3\n" +
                 $"Plugin loaded: {_bridge.IsLoaded}\n" +
                 $"Native version: {ThreeOSBridge.FormatVersion(_bridge.NativeVersion)}\n" +
                 $"ABI version: {_bridge.NativeAbiVersion}\n" +
-                $"Ticks: {_bridge.TickCount}\n" +
-                $"Last tick ok: {ticksOk}\n" +
-                $"Tracking flags: 0x{flags:X}\n" +
-                topo;
+                $"Ticks: {_bridge.TickCount} ok:{ticksOk}\n" +
+                $"Track: 0x{flags:X}\n" +
+                $"{topo}\n" +
+                kin;
 
             if (!string.IsNullOrEmpty(_bridge.LastError))
             {

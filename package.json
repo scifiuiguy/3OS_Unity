@@ -1,6 +1,6 @@
 {
   "name": "com.scifiuiguy.threeos.unity",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "displayName": "3OS Unity",
   "description": "Unity UPM host for the 3OS volumetric OS kernel (P/Invoke to 3os_kernel). Pair with https://github.com/scifiuiguy/3OS.",
   "unity": "6000.0",

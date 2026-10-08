@@ -5,7 +5,7 @@ using UnityEngine;
 namespace ThreeOS
 {
     /// <summary>
-    /// P/Invoke lifecycle for <c>3os_kernel</c> including Phase 0.2 topology.
+    /// P/Invoke lifecycle for <c>3os_kernel</c> including topology + kinematics.
     /// </summary>
     public sealed class ThreeOSBridge : MonoBehaviour
     {
@@ -48,6 +48,12 @@ namespace ThreeOS
         private static extern uint threeos_sizeof_double_proxy_state();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_kinetic_state();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_stick_debug();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_topology_set_scale(float worldToProxyRatio);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
@@ -88,6 +94,25 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_topology_dome_drop(ref ThreeOSPose domeLocalPose, out ThreeOSPose outFar);
 
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_set_params(float gain, float deadzoneM, float friction,
+            float floorY);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_possess(ulong entityId, ref ThreeOSPose objectPose);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_release();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_get_state(out InteropKineticState outState);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_get_stick_debug(out InteropStickDebug outDebug);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_set_object_pose(ref ThreeOSPose objectPose);
+
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
         public uint NativeVersion { get; private set; }
@@ -117,6 +142,18 @@ namespace ThreeOS
                         threeos_sizeof_double_proxy_state() != InteropStructs.DoubleProxyStateBytes)
                     {
                         LastError = "Topology ABI size mismatch";
+                        IsLoaded = false;
+                        Debug.LogError($"[3OS] {LastError}");
+                        return;
+                    }
+                }
+
+                if (NativeAbiVersion >= 3)
+                {
+                    if (threeos_sizeof_kinetic_state() != InteropStructs.KineticStateBytes ||
+                        threeos_sizeof_stick_debug() != InteropStructs.StickDebugBytes)
+                    {
+                        LastError = "Kinematics ABI size mismatch";
                         IsLoaded = false;
                         Debug.LogError($"[3OS] {LastError}");
                         return;
@@ -338,6 +375,59 @@ namespace ThreeOS
                 return false;
             }
         }
+
+        public bool SetKinematicsParams(float gain, float deadzoneM, float friction, float floorY) =>
+            Call(() => threeos_kinematics_set_params(gain, deadzoneM, friction, floorY));
+
+        public bool Possess(ulong entityId, ThreeOSPose objectPose) =>
+            Call(() => threeos_kinematics_possess(entityId, ref objectPose));
+
+        public bool ReleasePossessed() => Call(threeos_kinematics_release);
+
+        public bool TryGetKineticState(out InteropKineticState state)
+        {
+            state = default;
+            if (!IsLoaded) return false;
+            try
+            {
+                if (threeos_kinematics_get_state(out state) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        public bool TryGetStickDebug(out InteropStickDebug debug)
+        {
+            debug = default;
+            if (!IsLoaded) return false;
+            try
+            {
+                if (threeos_kinematics_get_stick_debug(out debug) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        public bool SetKinematicObjectPose(ThreeOSPose objectPose) =>
+            Call(() => threeos_kinematics_set_object_pose(ref objectPose));
 
         public static string FormatVersion(uint packed)
         {
