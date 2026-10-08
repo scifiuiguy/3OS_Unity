@@ -1,0 +1,29 @@
+{
+  "name": "com.scifiuiguy.threeos.unity",
+  "version": "0.2.0",
+  "displayName": "3OS Unity",
+  "description": "Unity UPM host for the 3OS volumetric OS kernel (P/Invoke to 3os_kernel). Pair with https://github.com/scifiuiguy/3OS.",
+  "unity": "6000.0",
+  "documentationUrl": "https://github.com/scifiuiguy/3OS_Unity",
+  "changelogUrl": "https://github.com/scifiuiguy/3OS_Unity/releases",
+  "licensesUrl": "https://github.com/scifiuiguy/3OS_Unity/blob/main/LICENSE",
+  "keywords": [
+    "xr",
+    "openxr",
+    "quest",
+    "volumetric",
+    "3os"
+  ],
+  "author": {
+    "name": "scifiuiguy",
+    "url": "https://github.com/scifiuiguy"
+  },
+  "license": "MIT",
+  "samples": [
+    {
+      "displayName": "3OS Demo Scene",
+      "description": "Empty OpenXR-oriented smoke-test scene for Quest / Editor Link.",
+      "path": "Samples~/Demo"
+    }
+  ]
+}

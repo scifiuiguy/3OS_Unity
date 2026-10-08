@@ -34,18 +34,18 @@ Core 0.0 ──► Core 0.1 (small ABI freeze) ──► Core 0.2 … ──► 
 **Pairs with:** Core 0.0  
 **Goal:** Installable package shell and a Quest-capable sample project — no native calls required yet.
 
-- [ ] **Task U0.1: UPM skeleton**
-  - [ ] Real `package.json` (`com.scifiuiguy.threeos.unity`), asmdef, folder layout from README.
-  - [ ] Fix README Git URL / manifest install line (placeholders today).
-  - [ ] MIT `LICENSE`, `.gitignore` (Library, Temp, builds, large binaries policy).
-- [ ] **Task U0.2: Sample project wiring**
-  - [ ] Unity 2022.3 LTS+ sample with OpenXR + XR Interaction / XR Hands as needed for Quest 2.
-  - [ ] Empty `Samples~/3OS_DemoScene.unity` deploys to Quest (smoke test).
-- [ ] **Task U0.3: Native binary pipeline (stubs)**
-  - [ ] `Native~/` submodule (or documented path) pointing at `scifiuiguy/3OS`.
-  - [ ] Document how Windows `3os_kernel.dll` and Android `lib3os_kernel.so` land in `Plugins/`.
+- [x] **Task U0.1: UPM skeleton**
+  - [x] Real `package.json` (`com.scifiuiguy.threeos.unity`), asmdef, folder layout from README.
+  - [x] Fix README Git URL / manifest install line (placeholders today).
+  - [x] MIT `LICENSE`, `.gitignore` (Library, Temp, builds, large binaries policy).
+- [x] **Task U0.2: Sample project wiring**
+  - [x] Unity 6 sample host at sibling `../3OS_Unity_Sample_Project` (created via Editor/CLI only) with OpenXR + XR Interaction / XR Hands as needed for Quest 2.
+  - [x] Empty `Samples~/Demo/3OS_DemoScene.unity` (+ host `Assets/Scenes/3OS_DemoScene.unity`) for Quest smoke test.
+- [x] **Task U0.3: Native binary pipeline (stubs)**
+  - [x] `Native~/` documented path pointing at `scifiuiguy/3OS` (submodule optional later).
+  - [x] Document how Windows `3os_kernel.dll` and Android `lib3os_kernel.so` land in `Plugins/` (`docs/NATIVE_BINARIES.md`).
 
-**Quest gate:** Demo scene launches on Quest 2 (black room / XR rig OK).
+**Quest gate:** Demo scene launches on Quest 2 (black room / XR rig OK) — **passed** (head tracking / immersive XR).
 
 ---
 
@@ -53,19 +53,19 @@ Core 0.0 ──► Core 0.1 (small ABI freeze) ──► Core 0.2 … ──► 
 **Pairs with:** Core 0.1 (**blocks Unity 0.1** — ABI must exist first)  
 **Goal:** Verification channel. Not cinematic — prove the pipe.
 
-- [ ] **Task U1.1: Blittable C# mirrors**
-  - [ ] `InteropStructs.cs` matches core layouts; assert sizes in Editor where practical.
-  - [ ] Document units/handedness parity with core interop docs.
-- [ ] **Task U1.2: `ThreeOSBridge`**
-  - [ ] Load `3os_kernel` (Editor Windows DLL + Quest Android SO).
-  - [ ] Lifecycle: init / tick / shutdown; `threeos_version` (or equivalent) ping.
-- [ ] **Task U1.3: `ThreeOSInputRouter`**
-  - [ ] Map XR Hands / controllers → `InteropInputFrame` each frame.
-  - [ ] Fail soft if tracking lost; no native crashes on null poses.
-- [ ] **Task U1.4: Debug HUD**
-  - [ ] On-screen: plugin loaded, ABI version, frame counter, last error.
+- [x] **Task U1.1: Blittable C# mirrors**
+  - [x] `InteropStructs.cs` matches core layouts; assert sizes in Editor where practical.
+  - [x] Document units/handedness parity with core interop docs.
+- [x] **Task U1.2: `ThreeOSBridge`**
+  - [x] Load `3os_kernel` (Editor Windows DLL + Quest Android SO).
+  - [x] Lifecycle: init / tick / shutdown; `threeos_version` (or equivalent) ping.
+- [x] **Task U1.3: `ThreeOSInputRouter`**
+  - [x] Map XR Hands / controllers → `InteropInputFrame` each frame.
+  - [x] Fail soft if tracking lost; no native crashes on null poses.
+- [x] **Task U1.4: Debug HUD**
+  - [x] On-screen: plugin loaded, ABI version, frame counter, last error.
 
-**Quest gate:** App runs on Quest 2; HUD shows successful ping and continuous frame marshal for ≥30s.
+**Quest gate:** App runs on Quest 2; HUD shows successful ping and continuous frame marshal for ≥30s — **passed** (`Plugin loaded: true`, ticks climbing on device).
 
 ---
 
@@ -73,14 +73,14 @@ Core 0.0 ──► Core 0.1 (small ABI freeze) ──► Core 0.2 … ──► 
 **Pairs with:** Core 0.2  
 **Goal:** See and drive topology on device.
 
-- [ ] **Task U2.1: Prefabs**
-  - [ ] `WorldProxyDome.prefab` and `DoubleProxyLattice.prefab` driven by kernel state (not fake local-only logic).
-- [ ] **Task U2.2: Scene sync**
-  - [ ] Apply proxy open/close and coordinate remaps from native tick results to Unity transforms/meshes.
-- [ ] **Task U2.3: Portal interactions**
-  - [ ] Near ↔ far and cross-proxy drag update the correct far-field GameObject pose.
+- [x] **Task U2.1: Prefabs**
+  - [x] Runtime `ThreeOSWorldProxyDome` / `ThreeOSDoubleProxyLattice` visuals driven by kernel state (procedural stand-ins for prefabs; not fake local-only logic).
+- [x] **Task U2.2: Scene sync**
+  - [x] Apply proxy open/close and coordinate remaps from native topology APIs to Unity transforms/meshes.
+- [x] **Task U2.3: Portal interactions**
+  - [x] Near ↔ far and cross-proxy drag update the correct far-field GameObject pose (`ThreeOSTopologyController` + `ThreeOSMovable`).
 
-**Quest gate:** Spawn Half-Dome → select region → Double-Proxy → portal-drag a test cube far ↔ near.
+**Quest gate:** Menu opens Half-Dome → Select opens Double-Proxy lattices → Grab/release portal-drags the magenta test cube far ↔ near / cross-proxy — **pending device run**.
 
 ---
 

@@ -2,6 +2,8 @@
 
 A drop-in Unity SDK for **3OS (Three-Oh-Ess)**, a voxel-first spatial operating system interface. This repository provides a Unity Package Manager (UPM) compliant wrapper that marshals high-performance native C++ volumetric interactions directly into the Unity Engine runtime.
 
+Core kernel: [scifiuiguy/3OS](https://github.com/scifiuiguy/3OS). Local verification host: sibling folder `3OS_Unity_Sample_Project` (Unity 6, created via Editor/CLI).
+
 ## 🚀 Key Features
 
 * **Biomechanical Subordination:** Rest your arms. All processing maps down to wrist, finger, and gaze intent vectors, completely neutralizing shoulder (coracobrachialis) fatigue.
@@ -11,56 +13,71 @@ A drop-in Unity SDK for **3OS (Three-Oh-Ess)**, a voxel-first spatial operating 
 
 ## 📦 Installation via Unity Package Manager
 
-You can install this SDK directly into your Unity project using the Git URL.
+**Unity 6 (`6000.0`) recommended.**
 
-1. Open your Unity project (**Unity 2022.3 LTS or newer recommended**).
-2. Navigate to **Window** > **Package Manager**.
-3. Click the **+** (plus) icon in the top-left corner and select **Add package from git URL...**
-4. Paste the following URL:
-   `https://github.com`
-5. Click **Add**.
+### Local sibling (dev / Quest smoke test)
 
-*Alternatively, add the following line directly to your project's `Packages/manifest.json`:*
+In `3OS_Unity_Sample_Project/Packages/manifest.json`:
+
 ```json
-"com.scifiuiguy.threeos.unity": "https://github.com"
+"com.scifiuiguy.threeos.unity": "file:../../3OS_Unity"
+```
+
+
+### Git URL
+
+1. Open your Unity project.
+2. **Window** → **Package Manager** → **+** → **Add package from git URL...**
+3. Paste:
+
+```text
+https://github.com/scifiuiguy/3OS_Unity.git
+```
+
+*Or in `Packages/manifest.json`:*
+
+```json
+"com.scifiuiguy.threeos.unity": "https://github.com/scifiuiguy/3OS_Unity.git"
 ```
 
 ## 📂 File Structure Outline
 
 ```text
 3OS_Unity/
-├── package.json                    # Unity Package Manager metadata & dependency manifest
-├── README.md                       # Package documentation & architectural quickstart
-├── Native~/                        # Git Submodule tracking the core C++ source engine
-│   └── 3os-core/
+├── package.json
+├── README.md
+├── LICENSE
+├── docs/NATIVE_BINARIES.md         # How 3os_kernel.dll / .so land in Plugins/
+├── Native~/                        # Optional git submodule → scifiuiguy/3OS
 ├── Plugins/
-│   ├── Android/
-│   │   └── lib3os_kernel.so        # Pre-compiled native binary optimized for Quest 2 / Snapdragon XR2
-│   └── Windows/
-│       └── 3os_kernel.dll          # Pre-compiled native binary for PC VR & Editor Link execution
+│   ├── Android/                    # lib3os_kernel.so (Quest)
+│   └── Windows/                    # 3os_kernel.dll (Editor / PC VR)
 ├── Runtime/
-│   ├── ThreeOS.Runtime.asmdef      # Assembly Definition mapping strict compilation isolation bounds
+│   ├── ThreeOS.Runtime.asmdef
 │   ├── Components/
-│   │   ├── ThreeOSBridge.cs        # Primary P/Invoke native library handle & lifecycle container
-│   │   ├── ThreeOSInputRouter.cs   # Translates Unity XR Hands/Controllers to 3OS Input Frame payloads
-│   │   └── ThreeOSMovable.cs       # Component attached to target GameObjects to execute velocity metrics
+│   │   ├── ThreeOSBridge.cs
+│   │   ├── ThreeOSInputRouter.cs
+│   │   └── ThreeOSMovable.cs
 │   └── Data/
-│       └── InteropStructs.cs       # Byte-aligned C# mirrors matching native C structures
+│       └── InteropStructs.cs
 ├── Shaders/
-│   └── UnitySemanticMask.shader    # Universal Render Pipeline (URP) vertex shader for non-clipping walls
-└── Samples~/                       # Optional sandbox templates (ignored by production builds)
-    ├── Prefabs/
-    │   ├── WorldProxyDome.prefab
-    │   └── DoubleProxyLattice.prefab
-    └── 3OS_DemoScene.unity         # Ready-to-test Quest 2 OpenXR evaluation environment
+└── Samples~/
+    └── Demo/
+        └── 3OS_DemoScene.unity     # Smoke-test scene (Editor-generated)
 ```
 
 ## 🛠 Quickstart Guide
 
-1. Ensure you have an active OpenXR pipeline configured in your **Project Settings** > **XR Plug-in Management**.
-2. Drop the `3OS_Core_Bridge` prefab (found in `Samples~/Prefabs`) into your scene hierarchy.
-3. Reference your active hand tracking transforms or controller anchors within the `ThreeOSInputRouter` inspector slots.
-4. Add the `ThreeOSMovable` component to any 3D asset in your scene to instantly grant it telekinetic velocity properties and subject it to system-level floor and wall enclosure constraints.
+1. Open `3OS_Unity_Sample_Project` in **Unity 6** (`6000.0.60f1` or newer 6000.0.x).
+2. Confirm the `file:../3OS_Unity` package resolves in Package Manager.
+3. Configure **Project Settings** → **XR Plug-in Management** → **OpenXR** (Meta Quest feature group for device builds).
+4. Open `Assets/Scenes/3OS_DemoScene` (host copy) or import the package sample **3OS Demo Scene**.
+5. Build & Run to Quest 2 when ready (Phase 0.0 gate: empty scene launches).
+
+**Phase 0.1:** Drop `ThreeOSBridge` + `ThreeOSInputRouter` + `ThreeOSDebugHud` on a GameObject (sample host uses `3OS_Harness`). Plugins ship under `Plugins/Windows/3os_kernel.dll` and `Plugins/Android/lib3os_kernel.so` (+ `libc++_shared.so`). HUD should show version `0.1.0`, ABI `1`, and rising tick count.
+
+See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) and [docs/NATIVE_BINARIES.md](docs/NATIVE_BINARIES.md).
 
 ## 📄 License
+
 This project is open-source software licensed under the MIT License.

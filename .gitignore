@@ -1,0 +1,36 @@
+# Unity / OS noise (package sources should stay clean)
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+.DS_Store
+Thumbs.db
+.vs/
+.idea/
+
+# Do not commit built natives by accident from local core builds
+# (checked-in Plugins/ binaries are intentional when released)
+*.exp
+*.ilk
+*.iobj
+*.ipdb
+
+# Local editor logs
+*.log
