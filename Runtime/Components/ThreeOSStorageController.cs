@@ -7,8 +7,8 @@ using UnityEngine.Networking;
 namespace ThreeOS
 {
     /// <summary>
-    /// Phase 0.4: at Start, list demo dir and instantiate semi-transparent glyphs + labels,
-    /// snap-insert into Box with open/bump/close anim, write-through FS move.
+    /// Phase 0.4: list demo dir, cubic matrix glyphs + labels, trigger tap select / hold drag,
+    /// snap-insert with open/bump/close, write-through FS cut, glow selection materials.
     /// </summary>
     public sealed class ThreeOSStorageController : MonoBehaviour
     {
@@ -16,14 +16,23 @@ namespace ThreeOS
         /// <summary>Glyph visual size in meters (matches Blender-authored 0.1 m packs).</summary>
         public const float GlyphSizeM = 0.1f;
         public float PossessDistance = 0.45f;
+        /// <summary>Trigger held at least this long starts drag (telekinesis); shorter tap selects.</summary>
+        public float TriggerHoldDragSeconds = 0.22f;
+        public float TriggerAxisThreshold = 0.55f;
+
+        [Header("Glyph selection glow (ThreeOS/Glyph)")]
+        [Tooltip("Look-dev asset (Create → 3OS → Glyph Glow Settings). Per-glyph base tint is separate.")]
+        public ThreeOSGlyphGlowSettings GlyphGlowSettings;
 
         private ThreeOSBridge _bridge;
         private ThreeOSInputRouter _input;
         private ThreeOSTopologyController _topology;
 
         private readonly Dictionary<ulong, GlyphView> _views = new Dictionary<ulong, GlyphView>();
-        private LineRenderer _insertArrow;
-        private bool _grabWasDown;
+        private ThreeOSArrowVisual _insertArrow;
+        private bool _triggerWasDown;
+        private float _triggerDownTime;
+        private bool _triggerDragActive;
         private bool _possessing;
         private ulong _possessedId;
         private bool _insertAnimBusy;
@@ -31,10 +40,28 @@ namespace ThreeOS
         private string _demoRoot = string.Empty;
         private ThreeOSPose _layoutHeadPose;
         private bool _waitingForAllFilesAccess;
+        private string _selectionLabel = "none";
+
+        // All Boxes share one ThreeOS/Glyph material; selection is _Selected via MPB.
+        private Material _sharedBoxMaterial;
+        /// <summary>Resources material that references <c>ThreeOS/Glyph</c> so the shader is not stripped.</summary>
+        private Material _glyphShaderTemplate;
+        private bool _loggedMissingGlyphShader;
+        private MaterialPropertyBlock _glyphMpb;
+        private static readonly int SelectedProp = Shader.PropertyToID("_Selected");
+        private static readonly int BaseColorProp = Shader.PropertyToID("_BaseColor");
+        private static readonly int GlowColorProp = Shader.PropertyToID("_GlowColor");
+        private static readonly int GlowIntensityProp = Shader.PropertyToID("_GlowIntensity");
+        private static readonly int GlowPowerProp = Shader.PropertyToID("_GlowPower");
+        private static readonly int GlowWidthProp = Shader.PropertyToID("_GlowWidth");
+        private static readonly int GlowBoostProp = Shader.PropertyToID("_GlowBoost");
+        private static readonly int GlowViewMixProp = Shader.PropertyToID("_GlowViewMix");
 
         public bool DemoActive { get; private set; }
         public string Status => _status;
         public string DemoRoot => _demoRoot;
+        /// <summary>HUD smoke label for ABI selection (<c>none</c> or entity name).</summary>
+        public string SelectionLabel => _selectionLabel;
 
         private sealed class GlyphView
         {
@@ -45,6 +72,10 @@ namespace ThreeOS
             public TextMesh NameLabel;
             public TextMesh SecondaryLabel;
             public string GlyphId;
+            /// <summary>Shared or owned <c>ThreeOS/Glyph</c> material (Fresnel is a shader pass, not a swap).</summary>
+            public Material Material;
+            /// <summary>False for shared Box material — do not Destroy on view teardown.</summary>
+            public bool OwnsMaterial;
         }
 
         private void Awake()
@@ -53,8 +84,43 @@ namespace ThreeOS
             _input = GetComponent<ThreeOSInputRouter>() ?? FindFirstObjectByType<ThreeOSInputRouter>();
             _topology = GetComponent<ThreeOSTopologyController>() ??
                         FindFirstObjectByType<ThreeOSTopologyController>();
-            EnsureInsertArrow();
+            if (GlyphGlowSettings == null)
+            {
+                GlyphGlowSettings = Resources.Load<ThreeOSGlyphGlowSettings>("3OS/GlyphGlowSettings");
+            }
+
+            // Must be a Resources material referencing ThreeOS/Glyph — Shader.Find is unreliable
+            // on Quest player builds and silently fell back to Unlit (no Fresnel).
+            _glyphShaderTemplate = Resources.Load<Material>("3OS/GlyphDefault");
+            if (_glyphShaderTemplate == null || _glyphShaderTemplate.shader == null ||
+                _glyphShaderTemplate.shader.name != "ThreeOS/Glyph")
+            {
+                Debug.LogError(
+                    "[3OS] Missing Resources/3OS/GlyphDefault.mat (ThreeOS/Glyph). " +
+                    "Selection Fresnel will not render on device.");
+            }
+
+            _insertArrow = ThreeOSArrowVisual.Create("3OS_InsertArrow", 0.01f);
         }
+
+        private Color ResolvedGlowColor =>
+            GlyphGlowSettings != null ? GlyphGlowSettings.GlowColor : Color.white;
+
+        // Fallbacks match FresnelTest2 / ThreeOSGlyphGlowSettings defaults.
+        private float ResolvedGlowIntensity =>
+            GlyphGlowSettings != null ? GlyphGlowSettings.GlowIntensity : 0.5f;
+
+        private float ResolvedGlowPower =>
+            GlyphGlowSettings != null ? GlyphGlowSettings.GlowPower : 3f;
+
+        private float ResolvedGlowWidth =>
+            GlyphGlowSettings != null ? GlyphGlowSettings.GlowWidth : 0.5f;
+
+        private float ResolvedGlowBoost =>
+            GlyphGlowSettings != null ? GlyphGlowSettings.GlowBoost : 4f;
+
+        private float ResolvedGlowViewMix =>
+            GlyphGlowSettings != null ? GlyphGlowSettings.GlowViewMix : 0.5f;
 
         private IEnumerator Start()
         {
@@ -96,6 +162,9 @@ namespace ThreeOS
             }
 
             DemoActive = true;
+            var kin = GetComponent<ThreeOSKinematicsController>() ??
+                      FindFirstObjectByType<ThreeOSKinematicsController>();
+            kin?.PushKinematicsParams();
             RebuildViews();
             _status = $"demo {_views.Count} glyphs @ {ShortPath(_demoRoot)}";
             Debug.Log(
@@ -225,7 +294,8 @@ namespace ThreeOS
             }
 
             SyncViewsFromKernel();
-            HandleGrab();
+            HandleTriggerSelectAndDrag();
+            SyncSelectionMaterials();
             UpdateInsertArrow();
             HandleStorageEvents();
             BillboardLabels();
@@ -476,6 +546,10 @@ namespace ThreeOS
         private static bool FileLooksPresent(string path) =>
             !string.IsNullOrEmpty(path) &&
             (File.Exists(path) || ThreeOSAndroidStorage.Exists(path));
+
+        private static bool DirectoryLooksPresent(string path) =>
+            !string.IsNullOrEmpty(path) &&
+            (Directory.Exists(path) || ThreeOSAndroidStorage.Exists(path));
 
         /// <summary>True when root has any file (root or one level down). Folders alone do not count.</summary>
         private static bool DemoTreeHasAnyContent(string root)
@@ -793,10 +867,7 @@ namespace ThreeOS
         {
             foreach (var kv in _views)
             {
-                if (kv.Value.Root != null)
-                {
-                    Destroy(kv.Value.Root);
-                }
+                DestroyGlyphView(kv.Value);
             }
 
             _views.Clear();
@@ -839,19 +910,22 @@ namespace ThreeOS
             }
 
             var mr = visual.GetComponent<MeshRenderer>();
-            mr.sharedMaterial = MakeGlyphMaterial(item);
+            ResolveGlyphMaterial(item, out var mat, out var ownsMaterial);
+            mr.sharedMaterial = mat;
+            ApplyGlyphSelection(mr, selected: false, GlyphBaseColor(item));
 
             var unityPose = InteropStructs.ToUnityPose(item.pose);
             go.transform.SetPositionAndRotation(unityPose.position, unityPose.rotation);
 
             // Labels sit below the glyph in local space (half-size + gap).
+            // Character sizes are pre-ducked 10% from the original 0.008 / 0.006.
             var labelY = -(GlyphSizeM * 0.5f + 0.025f);
-            var nameLabel = CreateLabel(go.transform, item.Name, new Vector3(0f, labelY, 0f), 0.008f);
+            var nameLabel = CreateLabel(go.transform, item.Name, new Vector3(0f, labelY, 0f), 0.0072f);
             TextMesh secondary = null;
             if (item.kind == 1)
             {
                 secondary = CreateLabel(go.transform, item.SecondaryLabel,
-                    new Vector3(0f, labelY - 0.028f, 0f), 0.006f);
+                    new Vector3(0f, labelY - 0.028f, 0f), 0.0054f);
             }
 
             return new GlyphView
@@ -862,7 +936,9 @@ namespace ThreeOS
                 Collider = col,
                 NameLabel = nameLabel,
                 SecondaryLabel = secondary,
-                GlyphId = item.GlyphId
+                GlyphId = item.GlyphId,
+                Material = mat,
+                OwnsMaterial = ownsMaterial
             };
         }
 
@@ -883,61 +959,72 @@ namespace ThreeOS
             return Vector3.one * GlyphSizeM;
         }
 
-        private static Material MakeGlyphMaterial(InteropWorkspaceItem item)
+        private void ResolveGlyphMaterial(InteropWorkspaceItem item, out Material mat, out bool ownsMaterial)
         {
-            // Prefer distinct authored colors; ignore washed-out white tint from packs.
-            Color c;
-            if (item.GlyphId == "box_closed" || item.GlyphId == "box_open" || item.kind == 1)
+            if (item.kind == 1 || item.GlyphId == "box_closed" || item.GlyphId == "box_open")
             {
-                // Brown cardboard
-                c = new Color(0.55f, 0.36f, 0.18f, 0.55f);
+                EnsureSharedBoxMaterial();
+                mat = _sharedBoxMaterial;
+                ownsMaterial = false;
+                return;
             }
-            else if (item.GlyphId == "gltf_mark")
+
+            mat = MakeGlyphMaterial(item);
+            ownsMaterial = true;
+        }
+
+        private void EnsureSharedBoxMaterial()
+        {
+            if (_sharedBoxMaterial != null)
             {
-                // Teal glTF-style mark
-                c = new Color(0.10f, 0.72f, 0.78f, 0.55f);
+                return;
+            }
+
+            _sharedBoxMaterial = MakeGlyphMaterialForColor(new Color(0.55f, 0.36f, 0.18f, 0.55f),
+                enableInstancing: true);
+            _sharedBoxMaterial.name = "3OS_SharedBoxGlyph";
+        }
+
+        private Material MakeGlyphMaterial(InteropWorkspaceItem item) =>
+            MakeGlyphMaterialForColor(GlyphBaseColor(item), enableInstancing: false);
+
+        /// <summary>
+        /// Canonical glyph material: <c>ThreeOS/Glyph</c>. Glow from
+        /// <see cref="GlyphGlowSettings"/>; per-glyph <paramref name="c"/> for base tint.
+        /// Selection is MPB <c>_Selected</c> (not a second material).
+        /// </summary>
+        private Material MakeGlyphMaterialForColor(Color c, bool enableInstancing)
+        {
+            Material mat;
+            if (_glyphShaderTemplate != null && _glyphShaderTemplate.shader != null &&
+                _glyphShaderTemplate.shader.name == "ThreeOS/Glyph")
+            {
+                mat = new Material(_glyphShaderTemplate);
             }
             else
             {
-                c = new Color(
-                    Mathf.Approximately(item.tintR, 1f) && Mathf.Approximately(item.tintG, 1f)
-                        ? 0.75f
-                        : item.tintR,
-                    Mathf.Approximately(item.tintR, 1f) && Mathf.Approximately(item.tintG, 1f)
-                        ? 0.75f
-                        : item.tintG,
-                    Mathf.Approximately(item.tintR, 1f) && Mathf.Approximately(item.tintG, 1f)
-                        ? 0.8f
-                        : item.tintB,
-                    Mathf.Clamp(item.tintA > 0.01f ? item.tintA : 0.55f, 0.2f, 0.85f));
+                // Editor / last resort. Prefer Resources template so player builds keep the shader.
+                var shader = Shader.Find("ThreeOS/Glyph");
+                if (shader == null)
+                {
+                    if (!_loggedMissingGlyphShader)
+                    {
+                        _loggedMissingGlyphShader = true;
+                        Debug.LogError(
+                            "[3OS] ThreeOS/Glyph not found — Fresnel disabled. " +
+                            "Ensure Runtime/Resources/3OS/GlyphDefault.mat is in the build.");
+                    }
+
+                    shader = Shader.Find("Unlit/Color") ?? Shader.Find("Sprites/Default") ??
+                             Shader.Find("Hidden/InternalErrorShader");
+                }
+
+                mat = new Material(shader);
             }
 
-            // Prefer simple unlit shaders — URP/Lit often shows magenta on Quest if variants strip.
-            var shader = Shader.Find("Unlit/Color");
-            if (shader == null)
+            if (mat.HasProperty(BaseColorProp))
             {
-                shader = Shader.Find("Sprites/Default");
-            }
-
-            if (shader == null)
-            {
-                shader = Shader.Find("Universal Render Pipeline/Unlit");
-            }
-
-            if (shader == null)
-            {
-                shader = Shader.Find("Universal Render Pipeline/Lit");
-            }
-
-            if (shader == null)
-            {
-                shader = Shader.Find("Hidden/InternalErrorShader");
-            }
-
-            var mat = new Material(shader);
-            if (mat.HasProperty("_BaseColor"))
-            {
-                mat.SetColor("_BaseColor", c);
+                mat.SetColor(BaseColorProp, c);
             }
 
             if (mat.HasProperty("_Color"))
@@ -946,21 +1033,137 @@ namespace ThreeOS
             }
 
             mat.color = c;
-
-            if (mat.HasProperty("_Surface"))
+            if (mat.HasProperty(SelectedProp))
             {
-                mat.SetFloat("_Surface", 1f);
-                mat.SetFloat("_Blend", 0f);
-                mat.SetOverrideTag("RenderType", "Transparent");
-                mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-                mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-                mat.SetInt("_ZWrite", 0);
-                mat.renderQueue = 3000;
-                mat.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
-                mat.DisableKeyword("_SURFACE_TYPE_OPAQUE");
+                mat.SetFloat(SelectedProp, 0f);
             }
 
+            if (mat.HasProperty(GlowColorProp))
+            {
+                mat.SetColor(GlowColorProp, ResolvedGlowColor);
+            }
+
+            if (mat.HasProperty(GlowIntensityProp))
+            {
+                mat.SetFloat(GlowIntensityProp, ResolvedGlowIntensity);
+            }
+
+            if (mat.HasProperty(GlowPowerProp))
+            {
+                mat.SetFloat(GlowPowerProp, ResolvedGlowPower);
+            }
+
+            if (mat.HasProperty(GlowWidthProp))
+            {
+                mat.SetFloat(GlowWidthProp, ResolvedGlowWidth);
+            }
+
+            if (mat.HasProperty(GlowBoostProp))
+            {
+                mat.SetFloat(GlowBoostProp, ResolvedGlowBoost);
+            }
+
+            if (mat.HasProperty(GlowViewMixProp))
+            {
+                mat.SetFloat(GlowViewMixProp, ResolvedGlowViewMix);
+            }
+
+            mat.enableInstancing = enableInstancing;
+            mat.renderQueue = 3000;
             return mat;
+        }
+
+        private void ApplyGlyphSelection(MeshRenderer renderer, bool selected, Color baseColor)
+        {
+            if (renderer == null)
+            {
+                return;
+            }
+
+            _glyphMpb ??= new MaterialPropertyBlock();
+
+            // Push selection + glow through MPB so Quest cannot miss material-only floats.
+            renderer.GetPropertyBlock(_glyphMpb);
+            _glyphMpb.SetFloat(SelectedProp, selected ? 1f : 0f);
+            _glyphMpb.SetColor(BaseColorProp, baseColor);
+            _glyphMpb.SetColor(GlowColorProp, ResolvedGlowColor);
+            _glyphMpb.SetFloat(GlowIntensityProp, ResolvedGlowIntensity);
+            _glyphMpb.SetFloat(GlowPowerProp, ResolvedGlowPower);
+            _glyphMpb.SetFloat(GlowWidthProp, ResolvedGlowWidth);
+            _glyphMpb.SetFloat(GlowBoostProp, ResolvedGlowBoost);
+            _glyphMpb.SetFloat(GlowViewMixProp, ResolvedGlowViewMix);
+            renderer.SetPropertyBlock(_glyphMpb);
+        }
+
+        private static Color GlyphBaseColor(InteropWorkspaceItem item)
+        {
+            if (item.GlyphId == "box_closed" || item.GlyphId == "box_open" || item.kind == 1)
+            {
+                return new Color(0.55f, 0.36f, 0.18f, 0.55f);
+            }
+
+            if (item.GlyphId == "gltf_mark")
+            {
+                return new Color(0.10f, 0.72f, 0.78f, 0.55f);
+            }
+
+            return new Color(
+                Mathf.Approximately(item.tintR, 1f) && Mathf.Approximately(item.tintG, 1f)
+                    ? 0.75f
+                    : item.tintR,
+                Mathf.Approximately(item.tintR, 1f) && Mathf.Approximately(item.tintG, 1f)
+                    ? 0.75f
+                    : item.tintG,
+                Mathf.Approximately(item.tintR, 1f) && Mathf.Approximately(item.tintG, 1f)
+                    ? 0.8f
+                    : item.tintB,
+                Mathf.Clamp(item.tintA > 0.01f ? item.tintA : 0.55f, 0.2f, 0.85f));
+        }
+
+        private void AssignGlyphMaterials(GlyphView view, InteropWorkspaceItem item)
+        {
+            if (view.OwnsMaterial && view.Material != null)
+            {
+                Destroy(view.Material);
+            }
+
+            ResolveGlyphMaterial(item, out var mat, out var ownsMaterial);
+            view.Material = mat;
+            view.OwnsMaterial = ownsMaterial;
+            if (view.Renderer != null)
+            {
+                view.Renderer.sharedMaterial = view.Material;
+                ApplyGlyphSelection(view.Renderer, selected: false, GlyphBaseColor(item));
+            }
+        }
+
+        private void DestroyGlyphView(GlyphView view)
+        {
+            if (view == null)
+            {
+                return;
+            }
+
+            if (view.OwnsMaterial && view.Material != null)
+            {
+                Destroy(view.Material);
+            }
+
+            view.Material = null;
+
+            if (view.Root != null)
+            {
+                Destroy(view.Root);
+            }
+        }
+
+        private void OnDestroy()
+        {
+            if (_sharedBoxMaterial != null)
+            {
+                Destroy(_sharedBoxMaterial);
+                _sharedBoxMaterial = null;
+            }
         }
 
         private static TextMesh CreateLabel(Transform parent, string text, Vector3 localPos, float charSize)
@@ -971,7 +1174,7 @@ namespace ThreeOS
             var tm = go.AddComponent<TextMesh>();
             tm.text = string.IsNullOrEmpty(text) ? "?" : text;
             tm.characterSize = charSize;
-            tm.fontSize = 64;
+            tm.fontSize = 58; // 64 * 0.9 — duck labels ~10%
             tm.anchor = TextAnchor.MiddleCenter;
             tm.alignment = TextAlignment.Center;
             tm.color = Color.white;
@@ -1061,9 +1264,9 @@ namespace ThreeOS
                 if (view.GlyphId != item.GlyphId)
                 {
                     view.GlyphId = item.GlyphId;
+                    AssignGlyphMaterials(view, item);
                     if (view.Renderer != null)
                     {
-                        view.Renderer.sharedMaterial = MakeGlyphMaterial(item);
                         view.Renderer.transform.localScale = GlyphVisualScale(item.GlyphId);
                     }
                 }
@@ -1081,57 +1284,117 @@ namespace ThreeOS
 
             foreach (var id in remove)
             {
-                if (_views[id].Root != null)
-                {
-                    Destroy(_views[id].Root);
-                }
-
+                DestroyGlyphView(_views[id]);
                 _views.Remove(id);
             }
         }
 
-        private void HandleGrab()
+        /// <summary>
+        /// Index trigger: short tap = select/deselect; hold = telekinesis drag.
+        /// Grip/grab no longer drives storage possess (topology may still use Grab for portals).
+        /// </summary>
+        private void HandleTriggerSelectAndDrag()
         {
-            // Do NOT gate grab on _insertAnimBusy — a stuck insert coroutine used to
-            // disable possess for the rest of the session after a failed FS move.
-
-            var frame = _input.LastFrame;
-            var grab = (frame.buttonFlags & (uint)(ButtonFlags.RightGrab | ButtonFlags.LeftGrab)) != 0;
-            var aim = AimPose(frame);
-            var aimUnity = InteropStructs.ToUnityPose(aim).position;
-
-            if (grab && !_grabWasDown)
+            if (_topology != null && (_topology.DomeActive || _topology.LatticeActive))
             {
-                TryPossessNearest(aimUnity);
+                if (_triggerDragActive && _possessing)
+                {
+                    ReleasePossessedFromTrigger();
+                }
+
+                _triggerWasDown = false;
+                _triggerDragActive = false;
+                return;
             }
 
-            if (!grab && _grabWasDown && _possessing)
+            var frame = _input.LastFrame;
+            var triggerDown = frame.leftTrigger >= TriggerAxisThreshold ||
+                              frame.rightTrigger >= TriggerAxisThreshold;
+            var aim = AimPose(frame);
+            var aimUnity = InteropStructs.ToUnityPose(aim);
+
+            if (triggerDown && !_triggerWasDown)
             {
-                var hadSnap = _bridge.TryGetSnap(out var snap) && snap.pending != 0;
-                if (!_bridge.ReleasePossessed())
+                _triggerDownTime = Time.unscaledTime;
+                _triggerDragActive = false;
+            }
+
+            if (triggerDown && _triggerWasDown && !_triggerDragActive && !_possessing)
+            {
+                if (Time.unscaledTime - _triggerDownTime >= TriggerHoldDragSeconds)
                 {
-                    // Commit can fail if a prior FS event is still awaiting ack; keep trying insert.
-                    if (hadSnap && _bridge.TryCommitInsert())
+                    _triggerDragActive = true;
+                    TryPossessNearest(aimUnity.position);
+                }
+            }
+
+            if (!triggerDown && _triggerWasDown)
+            {
+                if (_triggerDragActive || _possessing)
+                {
+                    if (_possessing)
                     {
-                        _status = "insert committed (retry)";
-                    }
-                    else
-                    {
-                        _status = hadSnap
-                            ? $"insert failed: {_bridge.LastError}"
-                            : $"released (coast): {_bridge.LastError}";
+                        ReleasePossessedFromTrigger();
                     }
                 }
                 else
                 {
-                    _status = hadSnap ? "insert — waiting FS" : "released — coasting";
+                    // Short press: select hit glyph or clear on miss.
+                    ApplySelectAtAim(aimUnity.position, aimUnity.rotation * Vector3.forward);
                 }
 
-                _possessing = false;
-                _possessedId = 0;
+                _triggerDragActive = false;
             }
 
-            _grabWasDown = grab;
+            _triggerWasDown = triggerDown;
+        }
+
+        private void ApplySelectAtAim(Vector3 rayOrigin, Vector3 rayDir)
+        {
+            if (TryHitTestYawAligned(rayOrigin, rayDir, out var hitId))
+            {
+                if (_bridge.SetSelection(hitId))
+                {
+                    _selectionLabel = TryFindItem(hitId, out var item) ? item.Name : hitId.ToString();
+                    _status = $"Sel:{_selectionLabel}";
+                }
+                else
+                {
+                    _status = $"select failed: {_bridge.LastError}";
+                }
+            }
+            else
+            {
+                _bridge.ClearSelection();
+                _selectionLabel = "none";
+                _status = "Sel:none";
+            }
+        }
+
+        private void ReleasePossessedFromTrigger()
+        {
+            var hadSnap = _bridge.TryGetSnap(out var snap) && snap.pending != 0;
+            if (!_bridge.ReleasePossessed())
+            {
+                if (hadSnap && _bridge.TryCommitInsert())
+                {
+                    _status = "insert committed (retry)";
+                }
+                else
+                {
+                    _status = hadSnap
+                        ? $"insert failed: {_bridge.LastError}"
+                        : $"released (coast): {_bridge.LastError}";
+                }
+            }
+            else
+            {
+                _status = hadSnap ? "insert — waiting FS" : "released — coasting";
+            }
+
+            _possessing = false;
+            _possessedId = 0;
+            _triggerDragActive = false;
         }
 
         private void TryPossessNearest(Vector3 aimUnity)
@@ -1145,6 +1408,32 @@ namespace ThreeOS
                 _bridge.AckStorageEvent(false);
             }
 
+            _bridge.TryGetSelection(out var selectedId);
+
+            // Selection-gated far telekinesis: possess the selected glyph from any distance.
+            if (selectedId != 0 &&
+                _views.TryGetValue(selectedId, out var selectedView) &&
+                selectedView.Root != null && selectedView.Root.activeInHierarchy &&
+                selectedView.Movable != null &&
+                TryFindItem(selectedId, out var selectedItem) &&
+                (selectedItem.kind == 0 || selectedItem.kind == 1))
+            {
+                if (_bridge.Possess(selectedId, selectedView.Movable.CurrentOpenXrPose()))
+                {
+                    _possessing = true;
+                    _possessedId = selectedId;
+                    _status = selectedItem.kind == 1
+                        ? "far possess folder — stick drag"
+                        : "far possess — drag onto a folder";
+                }
+                else
+                {
+                    _status = $"possess failed: {_bridge.LastError}";
+                }
+
+                return;
+            }
+
             float best = PossessDistance;
             ulong bestId = 0;
             ThreeOSPose bestPose = default;
@@ -1156,8 +1445,8 @@ namespace ThreeOS
                     continue;
                 }
 
-                // Possess both Objects and Boxes (folders). Kernel snap-insert only
-                // applies to Objects dropped onto Boxes — dragging a Box just telekinetics it.
+                // Possess both Objects and Boxes (folders). Snap-insert supports
+                // object→box and box→box.
                 if (!TryFindItem(kv.Key, out var item) || (item.kind != 0 && item.kind != 1))
                 {
                     continue;
@@ -1183,11 +1472,146 @@ namespace ThreeOS
                 _possessing = true;
                 _possessedId = bestId;
                 var isBox = TryFindItem(bestId, out var possessed) && possessed.kind == 1;
-                _status = isBox ? "possessed folder — stick drag" : "possessed — drag onto a folder";
+                _status = isBox
+                    ? "possessed folder — drag onto a folder"
+                    : "possessed — drag onto a folder";
             }
             else
             {
                 _status = $"possess failed: {_bridge.LastError}";
+            }
+        }
+
+        private bool TryHitTestYawAligned(Vector3 rayOrigin, Vector3 rayDir, out ulong hitId)
+        {
+            hitId = 0;
+            if (rayDir.sqrMagnitude < 1e-8f)
+            {
+                return false;
+            }
+
+            rayDir.Normalize();
+            var yaw = FloorYawRotation();
+            var half = GlyphSizeM * 0.5f;
+            var bestT = float.PositiveInfinity;
+            ulong bestId = 0;
+
+            foreach (var kv in _views)
+            {
+                if (kv.Value.Root == null || !kv.Value.Root.activeInHierarchy)
+                {
+                    continue;
+                }
+
+                var center = kv.Value.Root.transform.position;
+                if (!RayHitsYawAlignedAabb(rayOrigin, rayDir, center, yaw, half, out var t) || t < 0f ||
+                    t >= bestT)
+                {
+                    continue;
+                }
+
+                bestT = t;
+                bestId = kv.Key;
+            }
+
+            if (bestId == 0)
+            {
+                return false;
+            }
+
+            hitId = bestId;
+            return true;
+        }
+
+        private static bool RayHitsYawAlignedAabb(Vector3 origin, Vector3 dir, Vector3 center,
+            Quaternion yaw, float half, out float tHit)
+        {
+            tHit = 0f;
+            var inv = Quaternion.Inverse(yaw);
+            var o = inv * (origin - center);
+            var d = inv * dir;
+            var tMin = float.NegativeInfinity;
+            var tMax = float.PositiveInfinity;
+
+            if (!Slab(o.x, d.x, -half, half, ref tMin, ref tMax) ||
+                !Slab(o.y, d.y, -half, half, ref tMin, ref tMax) ||
+                !Slab(o.z, d.z, -half, half, ref tMin, ref tMax))
+            {
+                return false;
+            }
+
+            tHit = tMin >= 0f ? tMin : tMax;
+            return tHit >= 0f;
+        }
+
+        private static bool Slab(float o, float d, float min, float max, ref float tMin, ref float tMax)
+        {
+            const float eps = 1e-8f;
+            if (Mathf.Abs(d) < eps)
+            {
+                return o >= min && o <= max;
+            }
+
+            var invD = 1f / d;
+            var t0 = (min - o) * invD;
+            var t1 = (max - o) * invD;
+            if (t0 > t1)
+            {
+                (t0, t1) = (t1, t0);
+            }
+
+            tMin = Mathf.Max(tMin, t0);
+            tMax = Mathf.Min(tMax, t1);
+            return tMin <= tMax;
+        }
+
+        private static Quaternion FloorYawRotation()
+        {
+            var fwd = Vector3.forward;
+            var cam = Camera.main;
+            if (cam != null)
+            {
+                fwd = cam.transform.forward;
+            }
+
+            fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-6f)
+            {
+                fwd = Vector3.forward;
+            }
+
+            return Quaternion.LookRotation(fwd.normalized, Vector3.up);
+        }
+
+        private void SyncSelectionMaterials()
+        {
+            _bridge.TryGetSelection(out var selectedId);
+            if (selectedId == 0)
+            {
+                _selectionLabel = "none";
+            }
+            else if (TryFindItem(selectedId, out var selectedItem))
+            {
+                _selectionLabel = selectedItem.Name;
+            }
+
+            foreach (var kv in _views)
+            {
+                var view = kv.Value;
+                if (view.Renderer == null)
+                {
+                    continue;
+                }
+
+                var selected = selectedId != 0 && kv.Key == selectedId &&
+                               view.Root != null && view.Root.activeInHierarchy;
+                if (!TryFindItem(kv.Key, out var item))
+                {
+                    ApplyGlyphSelection(view.Renderer, selected, Color.white);
+                    continue;
+                }
+
+                ApplyGlyphSelection(view.Renderer, selected, GlyphBaseColor(item));
             }
         }
 
@@ -1226,27 +1650,20 @@ namespace ThreeOS
         {
             if (_insertArrow == null || !_bridge.TryGetSnap(out var snap) || snap.pending == 0)
             {
-                if (_insertArrow != null)
-                {
-                    _insertArrow.enabled = false;
-                }
-
+                _insertArrow?.Hide();
                 return;
             }
 
             if (!_views.TryGetValue(snap.objectId, out var view) || view.Root == null)
             {
-                _insertArrow.enabled = false;
+                _insertArrow.Hide();
                 return;
             }
 
-            var tip = view.Root.transform.position + Vector3.down * 0.11f;
-            var basePos = tip + Vector3.down * 0.04f;
-            _insertArrow.enabled = true;
-            _insertArrow.positionCount = 2;
-            _insertArrow.SetPosition(0, tip);
-            _insertArrow.SetPosition(1, basePos);
-            _insertArrow.startColor = _insertArrow.endColor = new Color(1f, 0.85f, 0.2f, 0.9f);
+            // Shaft above the head tip so the cone points down into the target box.
+            var tip = view.Root.transform.position + Vector3.down * 0.15f;
+            var shaftStart = tip + Vector3.up * 0.045f;
+            _insertArrow.Set(shaftStart, tip, new Color(1f, 0.85f, 0.2f, 0.9f));
         }
 
         private void HandleStorageEvents()
@@ -1278,10 +1695,7 @@ namespace ThreeOS
                     _bridge.SetBoxOpen(ev.boxId, true);
                     var t = boxView.Root.transform;
                     var baseScale = t.localScale;
-                    t.localScale = baseScale * 1.15f;
-                    yield return new WaitForSeconds(0.14f);
-                    t.localScale = baseScale;
-                    yield return new WaitForSeconds(0.1f);
+                    yield return AnimateScaleBump(t, baseScale, 1.15f, 0.12f);
                     _bridge.SetBoxOpen(ev.boxId, false);
                     yield return new WaitForSeconds(0.08f);
                 }
@@ -1291,8 +1705,9 @@ namespace ThreeOS
                 }
 
                 ResolveInsertNames(ev, out var objName, out var boxName);
+                var sourceIsBox = TryFindItem(ev.objectId, out var srcItem) && srcItem.kind == 1;
                 _status = $"moving {objName} → {boxName}/";
-                yield return CommitInsertToDisk(objName, boxName, result =>
+                yield return CommitInsertToDisk(objName, boxName, sourceIsBox, result =>
                 {
                     ok = result.ok;
                     src = result.src;
@@ -1378,8 +1793,10 @@ namespace ThreeOS
         /// <summary>
         /// Write-through insert: cut within each demo root (Documents first on Quest so the
         /// MTP-visible original is renamed, not copied). Then scrub every root-level leftover.
+        /// Supports file Objects and folder Boxes (box-into-box).
         /// </summary>
-        private IEnumerator CommitInsertToDisk(string objName, string boxName, System.Action<InsertFsResult> done)
+        private IEnumerator CommitInsertToDisk(string objName, string boxName, bool sourceIsBox,
+            System.Action<InsertFsResult> done)
         {
             var result = new InsertFsResult
             {
@@ -1406,6 +1823,13 @@ namespace ThreeOS
 
             result.dst = Path.Combine(writeRoot, boxName, objName);
             result.src = Path.Combine(writeRoot, objName);
+
+            if (sourceIsBox)
+            {
+                yield return CommitInsertFolderToDisk(objName, boxName, docs, persistent, writeRoot,
+                    result, done);
+                yield break;
+            }
 
             byte[] data = null;
             string loadedFrom = null;
@@ -1596,6 +2020,100 @@ namespace ThreeOS
             done?.Invoke(result);
         }
 
+        private IEnumerator CommitInsertFolderToDisk(string folderName, string boxName, string docs,
+            string persistent, string writeRoot, InsertFsResult result, System.Action<InsertFsResult> done)
+        {
+            var docsSrc = Path.Combine(docs, folderName);
+            var needsDocumentsCut = DirectoryLooksPresent(docsSrc) ||
+                                    string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase);
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (needsDocumentsCut && !ThreeOSAndroidStorage.IsExternalStorageManager())
+            {
+                Debug.LogWarning("[3OS] deferring folder Documents cut until all-files access");
+                yield return EnsureAllFilesAccessForCut("grant All files access, then drop again");
+                if (!ThreeOSAndroidStorage.IsExternalStorageManager())
+                {
+                    result.ok = false;
+                    _status = "grant All files access, then drop again";
+                    done?.Invoke(result);
+                    yield break;
+                }
+            }
+#else
+            yield return null;
+#endif
+
+            var cutDocs = false;
+            if (ThreeOSAndroidStorage.IsExternalStorageManager())
+            {
+                cutDocs = TryCutRootFolder(docs, folderName, boxName);
+            }
+
+            var cutPers = TryCutRootFolder(persistent, folderName, boxName);
+            if (!string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(writeRoot, persistent, System.StringComparison.OrdinalIgnoreCase))
+            {
+                TryCutRootFolder(writeRoot, folderName, boxName);
+            }
+
+            var docsDst = Path.Combine(docs, boxName, folderName);
+            var persDst = Path.Combine(persistent, boxName, folderName);
+            var destLanded = DirectoryLooksPresent(docsDst) || DirectoryLooksPresent(persDst) ||
+                             DirectoryLooksPresent(result.dst);
+
+            if (DirectoryLooksPresent(docsDst))
+            {
+                result.dst = docsDst;
+                result.src = docsSrc;
+            }
+            else if (DirectoryLooksPresent(persDst))
+            {
+                result.dst = persDst;
+                result.src = Path.Combine(persistent, folderName);
+            }
+
+            result.ok = cutDocs || cutPers || destLanded;
+            Debug.Log(
+                $"[3OS] folder insert cut docs={cutDocs} pers={cutPers} destOk={destLanded} → {result.dst}");
+
+            if (!result.ok)
+            {
+                Debug.LogError("[3OS] folder insert: destination never landed — left source intact");
+            }
+
+            done?.Invoke(result);
+        }
+
+        private static IEnumerator AnimateScaleBump(Transform t, Vector3 baseScale, float peak,
+            float halfDuration)
+        {
+            if (t == null || halfDuration <= 1e-4f)
+            {
+                yield break;
+            }
+
+            float e = 0f;
+            while (e < halfDuration)
+            {
+                e += Time.deltaTime;
+                var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(e / halfDuration));
+                t.localScale = baseScale * Mathf.Lerp(1f, peak, u);
+                yield return null;
+            }
+
+            e = 0f;
+            while (e < halfDuration)
+            {
+                e += Time.deltaTime;
+                var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(e / halfDuration));
+                t.localScale = baseScale * Mathf.Lerp(peak, 1f, u);
+                yield return null;
+            }
+
+            t.localScale = baseScale;
+        }
+
         /// <summary>True when a written insert destination is present with non-zero size.</summary>
         private static bool DestFileOk(string path)
         {
@@ -1630,6 +2148,95 @@ namespace ThreeOS
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Move <c>{root}/{folder}</c> → <c>{root}/{box}/{folder}</c> (box-into-box).
+        /// </summary>
+        private bool TryCutRootFolder(string root, string folderName, string boxName)
+        {
+            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(folderName) ||
+                string.IsNullOrEmpty(boxName))
+            {
+                return false;
+            }
+
+            var src = Path.Combine(root, folderName);
+            var dst = Path.Combine(root, boxName, folderName);
+            if (!DirectoryLooksPresent(src))
+            {
+                return DirectoryLooksPresent(dst);
+            }
+
+            if (DirectoryLooksPresent(dst))
+            {
+                return true;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(root, boxName));
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[3OS] mkdir for folder cut {root}: {ex.Message}");
+                return false;
+            }
+
+            try
+            {
+                Directory.Move(src, dst);
+                if (DirectoryLooksPresent(dst))
+                {
+                    Debug.Log($"[3OS] folder Move OK {src} → {dst}");
+                    return true;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[3OS] folder Move {src}: {ex.Message}");
+            }
+
+            try
+            {
+                CopyDirectoryRecursive(src, dst);
+                if (!DirectoryLooksPresent(dst))
+                {
+                    return false;
+                }
+
+                try
+                {
+                    Directory.Delete(src, true);
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning($"[3OS] folder delete after copy {src}: {ex.Message}");
+                }
+
+                return true;
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[3OS] folder copy {src}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static void CopyDirectoryRecursive(string src, string dst)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (var file in Directory.GetFiles(src))
+            {
+                var name = Path.GetFileName(file);
+                File.Copy(file, Path.Combine(dst, name), true);
+            }
+
+            foreach (var dir in Directory.GetDirectories(src))
+            {
+                var name = Path.GetFileName(dir);
+                CopyDirectoryRecursive(dir, Path.Combine(dst, name));
+            }
         }
 
         /// <summary>
@@ -1844,26 +2451,6 @@ namespace ThreeOS
             var idx = path.Replace('/', Path.DirectorySeparatorChar)
                 .IndexOf(marker, System.StringComparison.OrdinalIgnoreCase);
             return idx >= 0 ? path.Substring(idx) : Path.GetFileName(path);
-        }
-
-        private void EnsureInsertArrow()
-        {
-            var go = GameObject.Find("3OS_InsertArrow");
-            if (go == null)
-            {
-                go = new GameObject("3OS_InsertArrow");
-            }
-
-            _insertArrow = go.GetComponent<LineRenderer>();
-            if (_insertArrow == null)
-            {
-                _insertArrow = go.AddComponent<LineRenderer>();
-            }
-
-            _insertArrow.material = new Material(Shader.Find("Sprites/Default"));
-            _insertArrow.widthMultiplier = 0.01f;
-            _insertArrow.useWorldSpace = true;
-            _insertArrow.enabled = false;
         }
 
         private static ThreeOSPose AimPose(InteropInputFrame frame)

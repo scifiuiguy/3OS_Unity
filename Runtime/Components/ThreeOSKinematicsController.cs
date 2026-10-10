@@ -13,8 +13,9 @@ namespace ThreeOS
         public float FloorY = 0f;
         /// <summary>Stick meters → object m/s (gain 10 ⇒ ~1 ft stick ≈ 3 m/s).</summary>
         public float Gain = 10f;
-        /// <summary>Min |hand - grabOrigin| before drive engages.</summary>
-        public float DeadzoneM = 0.01f;
+        /// <summary>Radial |hand - grabOrigin| deadzone; velocity hard-zeros inside.</summary>
+        public const float DefaultDeadzoneM = 0.015f;
+        public float DeadzoneM = DefaultDeadzoneM;
         public float Friction = 3.5f;
 
         private ThreeOSBridge _bridge;
@@ -22,7 +23,7 @@ namespace ThreeOS
         private ThreeOSTopologyController _topology;
         private ThreeOSMovable _target;
         private GameObject _floorVisual;
-        private LineRenderer _stickRay;
+        private ThreeOSArrowVisual _stickArrow;
 
         private bool _grabWasDown;
         private bool _possessing;
@@ -40,15 +41,25 @@ namespace ThreeOS
                         FindFirstObjectByType<ThreeOSTopologyController>();
             _target = FindFirstObjectByType<ThreeOSMovable>();
             EnsureFloorVisual();
-            EnsureStickRay();
+            _stickArrow = ThreeOSArrowVisual.Create("3OS_StickVelocityRay", 0.008f);
         }
 
         private void Start()
         {
-            if (_bridge != null && _bridge.IsLoaded)
+            PushKinematicsParams();
+        }
+
+        /// <summary>Push host gains/deadzone into the kernel (call after bridge load / demo start).</summary>
+        public void PushKinematicsParams()
+        {
+            if (_bridge == null || !_bridge.IsLoaded)
             {
-                _bridge.SetKinematicsParams(Gain, DeadzoneM, Friction, FloorY);
+                return;
             }
+
+            // Scene serialization can stale-override the script default — force product value.
+            DeadzoneM = DefaultDeadzoneM;
+            _bridge.SetKinematicsParams(Gain, DeadzoneM, Friction, FloorY);
         }
 
         private void Update()
@@ -151,7 +162,7 @@ namespace ThreeOS
         {
             // Drive from kernel stick_debug (works for StorageController possess too —
             // do not require this component's local _possessing flag).
-            if (_stickRay == null || _bridge == null || !_bridge.IsLoaded)
+            if (_stickArrow == null || _bridge == null || !_bridge.IsLoaded)
             {
                 HideStickRay();
                 return;
@@ -165,50 +176,22 @@ namespace ThreeOS
 
             var rayStart = InteropStructs.OpenXrToUnityPosition(dbg.rayOrigin.ToVector3());
             var rayEnd = InteropStructs.OpenXrToUnityPosition(dbg.rayTip.ToVector3());
-
-            _stickRay.enabled = true;
-            _stickRay.positionCount = 2;
-            _stickRay.SetPosition(0, rayStart);
-            _stickRay.SetPosition(1, rayEnd);
-
-            var color = dbg.inDeadzone != 0
-                ? new Color(0.4f, 0.75f, 1f, 0.35f)
-                : new Color(0.15f, 0.95f, 1f, 0.95f);
-            _stickRay.startColor = _stickRay.endColor = color;
-        }
-
-        private void EnsureStickRay()
-        {
-            var go = GameObject.Find("3OS_StickVelocityRay");
-            if (go == null)
+            if (dbg.inDeadzone != 0)
             {
-                go = new GameObject("3OS_StickVelocityRay");
+                var sphereColor = new Color(0.4f, 0.75f, 1f, 0.25f);
+                var ghostColor = new Color(0.55f, 0.85f, 1f, 0.75f);
+                _stickArrow.SetDeadzone(rayStart, rayEnd, sphereColor, ghostColor,
+                    DefaultDeadzoneM * 2f);
             }
-
-            _stickRay = go.GetComponent<LineRenderer>();
-            if (_stickRay == null)
+            else
             {
-                _stickRay = go.AddComponent<LineRenderer>();
+                _stickArrow.Set(rayStart, rayEnd, new Color(0.15f, 0.95f, 1f, 0.95f));
             }
-
-            _stickRay.material = new Material(Shader.Find("Sprites/Default"));
-            _stickRay.widthMultiplier = 0.008f;
-            _stickRay.useWorldSpace = true;
-            _stickRay.loop = false;
-            _stickRay.positionCount = 0;
-            _stickRay.numCapVertices = 4;
-            _stickRay.enabled = false;
         }
 
         private void HideStickRay()
         {
-            if (_stickRay == null)
-            {
-                return;
-            }
-
-            _stickRay.enabled = false;
-            _stickRay.positionCount = 0;
+            _stickArrow?.Hide();
         }
 
         private static ThreeOSPose AimPose(InteropInputFrame frame)

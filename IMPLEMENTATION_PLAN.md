@@ -23,7 +23,7 @@ Core 0.0 ──► Core 0.1 (small ABI freeze) ──► Core 0.2 … ──► 
 | **0.1** | Types + **frozen small ABI** + stub facade | Bridge + `InteropStructs` + input router + plugin load | Plugin loads; version/ping; frames marshal @ framerate |
 | **0.2** | Topology, Half-Dome, double-proxy, portals | Prefab visuals + apply remaps/teleports to scene objects | Dome → lattice → portal drag teleports a cube |
 | **0.3** | Velocity telekinesis + floor clamp | `ThreeOSMovable` applies kernel deltas | Wrist micro-glide + coast; floor holds |
-| **0.4** | Glyph registry, Box insert + FS events, host text | Demo dir glyphs/labels; snap-insert anim; disk move | `simple.glb` + `Test1` Box; drop-in writes to disk |
+| **0.4** | Glyph registry, cubic demo matrix, Box insert + cut events, selection | Dual-root demo dir; glyphs/labels; snap-insert anim; FS cut; select/highlight | Matrix field; drop-in **cuts** to disk; trigger select + far possess |
 | **0.5** | Layouts, anchors, selection frustum | Gestures/UI to toggle modes + frustum viz | Matrix/cluster; multi-select; ego/allo switch |
 | **0.6** | Full enclosure planes + AI command ABI | `UnitySemanticMask` + command hook from host | Wall clip looks right; one voice/command action |
 | **1.0** | Native OpenXR path in core (parity) | UPM polish, samples, docs, CI binaries | Full demo scene acceptance (same checklist as core 1.0) |
@@ -99,61 +99,61 @@ Core 0.0 ──► Core 0.1 (small ABI freeze) ──► Core 0.2 … ──► 
 
 ---
 
-### 📂 Phase 0.4: Glyphs & Host Text
+### 📂 Phase 0.4: Glyphs, FS sync & selection
 **Pairs with:** Core 0.4  
-**Goal:** Unity loads a minimal Quest test directory, draws typed glyphs + labels, supports drag-snap insert into a Box with open/closed anim, and write-through FS moves via kernel events.
+**Goal:** Unity loads the Quest/Editor demo directory, draws typed glyphs + labels in a cubic matrix field, supports drag-snap insert into a Box with open/closed anim, write-through **cut** via kernel events, and single-select far telekinesis.
 
 **Host notes (see core 0.4 for package design)**  
 - `.3glyph` = GLB bytes + embedded `THREEOS_glyph` association metadata (single file).  
 - **Schema + pack JSON + injector live in core:** `docs/THREEOS_glyph.md`, `docs/glyph_packs/`, `tools/inject_3glyph.py`.  
-- Unity imports/renders meshes; kernel owns extension → glyph_id, snap/insert, and mutation events.  
+- Unity installs packs into the kernel and draws **procedural semi-transparent glyph cubes** (authored `.3glyph` mesh decode can replace cubes later); kernel owns extension → glyph_id, snap/insert, mutation events, selection.  
 - Authored packs (Blender): glTF-logo glyph for `.glb`/`.gltf` **content**; `box` + `box_open` glyphs for Boxes.  
-- **Glyphs render semi-transparent** (alpha materials / URP Transparent). Not opaque blocks — see-through icons so the field stays readable behind them.
+- **Glyphs render semi-transparent** (Unlit/Sprites alpha path on Quest). Not opaque blocks.
 
-**Quest demo directory (operator-staged before launch)**  
-Document a fixed on-device path (e.g. app-accessible folder under Android scoped storage / known Quest path). Operator places **only**:
-
-1. `simple.glb` — content payload (a real GLB file the glyph *represents*, not the glyph asset).  
-2. `Test1/` — empty folder.
+**Quest demo directory (operator-staged)**  
+Documented path: **`/storage/emulated/0/Documents/3OS_Demo`** (Editor: `Documents/3OS_Demo`). Host also uses app **persistentDataPath/3OS_Demo** as the writable root and **additively syncs** Documents ↔ persistent (never wipes Documents). Minimal fixture remains `simple.glb` + `Test1/`; any additional files/folders under the root are listed as Objects/Boxes.
 
 **Expected first paint**
 
-- `simple.glb` → Object glyph (glTF pack) with label **`simple.glb`** below.  
-- Beside it → Box glyph (closed `box`) with primary label **`Test1`** and secondary **`0 objects`**.
+- Each root file → Object glyph (glTF pack id for `.glb`) with name label below.  
+- Each root folder → Box glyph (closed `box`) with name + secondary child-count label.  
+- Kernel `StorageLayoutDemo(head)` places all roots in a **cubic matrix** 1 m in front of the user (not a fixed two-item side-by-side row).
 
 **Drop-into-Box UX (host viz + anim; kernel snap/commit)**
 
-- Drag Object near Box within threshold → glyph snaps just above Box; show ↓ arrow icon under the name label (insert pending).  
-- **On snap:** kernel zeros Object velocity and re-anchors stick `start_hand` to the **current** hand pose (grip stays down — not a release). Pre-snap stick must not keep driving the Object. Same re-anchor on unsnap.  
+- Drag Object near Box within **0.2 m** → glyph snaps just above Box; show ↓ arrow under the name label (insert pending).  
+- **On snap:** kernel zeros Object velocity and re-anchors stick `start_hand` to the **current** hand pose (grip stays down). Same re-anchor on unsnap.  
 - Leave threshold → unsnap; hide arrow.  
-- Release while snapped → play sequence: swap Box mesh to `box_open` → scale bump **+10%** then return → swap back to closed `box`; Object glyph leaves the field; Box secondary label → **`1 object`**.  
-- Handle kernel `ObjectMovedIntoBox` (or equivalent): move `simple.glb` into `Test1/` on disk; report result so core can commit or roll back.
+- Release while snapped → play sequence: Box `box_open` → scale bump **+10%** then return → closed `box`; Object glyph leaves the field; Box secondary label updates (`1 object` / `N objects`).  
+- Handle kernel `ObjectMovedIntoBox`: **cut/move** the file into the Box folder on each demo root (Documents first on Quest when present); request `MANAGE_EXTERNAL_STORAGE` when Documents cut needs it; ack success/failure so core can commit or roll back. First drop may copy until all-files access is granted, then subsequent drops cut.
 
-- [ ] **Task U4.1: Demo directory wiring**
-  - [ ] Document agreed Quest test path; Editor fallback path for desk testing.
-  - [ ] On start, list that directory into the host ABI (expect `simple.glb` + `Test1` when staged correctly).
-  - [ ] Soft-fail HUD if listing empty/missing (prompt to stage files).
-- [ ] **Task U4.2: Glyph pack install**
-  - [ ] Ship sample packs under Samples/StreamingAssets: glTF-logo `.3glyph`, `box.3glyph`, `box_open.3glyph`; register with kernel at startup.
-  - [ ] Editor helper: `.glb` → inject `THREEOS_glyph` → `.3glyph` (optional).
-- [ ] **Task U4.3: Glyph + label instantiation**
-  - [ ] Spawn Object/Box visuals from kernel descriptors (`.3glyph` GLB load path; treat `.3glyph` as GLB).
-  - [ ] Force / preserve **semi-transparent** materials on glyph instances (do not upgrade imported GLB to opaque).
-  - [ ] World-space labels: Object name; Box name + smaller child-count line (labels stay opaque/readable).
-  - [ ] Layout: Object and Box side-by-side in the near field for the two-entry demo.
-- [ ] **Task U4.4: Drag, snap affordance, insert anim**
-  - [ ] Drive Object drag via existing possess/telekinesis or a 0.4 grab path; feed poses so kernel can evaluate Box proximity.
-  - [ ] When kernel reports insert-pending: snap visual to hold pose; show arrow under Object label (expect vel cleared / stick re-anchored in kernel — no host-side gain hacks).
-  - [ ] On commit event: play Box open → +10% bump → closed sequence; despawn/reparent Object glyph; refresh count label.
-- [ ] **Task U4.5: FS event sink**
-  - [ ] Subscribe to storage mutation events; perform Android/Editor file move into `Test1/`; ack success/failure to kernel.
-  - [ ] After success, re-list or trust kernel state so a relaunch shows `simple.glb` inside `Test1` (empty root aside from the Box).
-- [ ] **Task U4.6: Text injection**
-  - [ ] Unity keyboard / TMP / debug field → core text router → rename label updates.
-- [ ] **Task U4.7: Association / demo smoke**
-  - [ ] Debug readout: glyph_id, snap state, child count; confirm content `.glb` uses glTF pack (not Box packs).
+- [x] **Task U4.1: Demo directory wiring & dual-root sync**
+  - [x] Document Quest `Documents/3OS_Demo` + Editor fallback; persistent writable root ([`docs/QUEST_DEMO_DIR.md`](../docs/QUEST_DEMO_DIR.md) / Android storage helpers).
+  - [x] On start, list union of Documents + persistent into ABI (`storage_add_*`); folders → Boxes with child counts; files → Objects.
+  - [x] Additive Documents→persistent sync for MTP-staged content; soft-fail HUD if listing empty/missing.
+- [x] **Task U4.2: Glyph pack install**
+  - [x] Ship sample packs (`gltf_mark`, `box`, `box_open`) under package Resources/Runtime Glyphs; register with kernel at startup via `InstallGlyphPack`.
+  - [ ] Editor helper: `.glb` → inject `THREEOS_glyph` → `.3glyph` (optional; core `tools/inject_3glyph.py` covers authoring).
+- [x] **Task U4.3: Glyph + label instantiation + matrix field**
+  - [x] Spawn Object/Box visuals from kernel workspace items (procedural cubes sized to authored glyph scale; pack ids/tints drive look).
+  - [x] Force **semi-transparent** materials on glyph instances (Quest-safe Unlit/Sprites path).
+  - [x] World-space labels: Object name; Box name + smaller child-count line (billboarded, opaque/readable).
+  - [x] Layout: call `StorageLayoutDemo` cubic matrix for all in-field roots (replaces two-entry side-by-side).
+- [x] **Task U4.4: Drag, snap affordance, insert anim**
+  - [x] Drive Object/Box drag via possess/telekinesis; feed poses so kernel evaluates Box proximity.
+  - [x] When kernel reports insert-pending: snap visual to hold pose; show insert arrow (kernel vel clear / stick re-anchor).
+  - [x] On commit event: play Box open → +10% bump → closed; hide Object glyph; refresh count label from kernel.
+- [x] **Task U4.5: FS event sink (cut write-through)**
+  - [x] Poll storage mutation events; cut/move into Box on Android/Editor; ack success/failure; rollback path on failure.
+  - [x] Quest Documents cut gated on all-files access (`ThreeOSAndroidStorage`); persistent root always writable; relaunch listing shows file inside the Box.
+- [x] **Task U4.6: Single selection (0.4 tack-on)**
+  - [x] Index trigger → ABI `selection_set` / empty miss → `selection_clear` (skip while dome/lattice owns Select).
+  - [x] Yaw-aligned floor-parallel highlight box (matte white, alpha 0.2).
+  - [x] While selected, grip telekinesis works beyond near-field possess distance.
+- [x] **Task U4.7: Association / demo smoke**
+  - [x] Debug HUD: storage status, snap/insert messages, `Sel:<name|none>`; content `.glb` resolves to glTF pack id (not Box packs).
 
-**Quest gate:** Staged dir shows `simple.glb` glyph + `Test1` Box (`0 objects`); drag-snap shows arrow; release inserts with open/bump/close anim; file lands in `Test1/` on disk; Box shows `1 object`.
+**Quest gate:** Staged `3OS_Demo` shows glyphs + Boxes in cubic matrix; drag-snap insert with open/bump/close; file **cut** into folder on disk (APK 24+; grant all-files on first Documents drop); index-trigger select shows highlight; empty trigger clears; selected object stays far-draggable until deselect (APK 25+). *(Rename via keyboard is **not** required for 0.4 — see 1.0.)*
 
 ---
 
@@ -162,7 +162,7 @@ Document a fixed on-device path (e.g. app-accessible folder under Android scoped
 **Goal:** Expose workspace modes with Quest-friendly controls.
 
 - [ ] **Task U5.1: Mode toggles**
-  - [ ] Matrix / Cluster / Real Anchor controls (debug panel or gestures).
+  - [ ] Matrix / Cluster / Real Anchor controls (debug panel or gestures). *(0.4 already applies a demo cubic matrix via `StorageLayoutDemo`; 0.5 owns user-facing mode switching.)*
 - [ ] **Task U5.2: Anchor modes**
   - [ ] Ego / allo / object-locked parenting behaves correctly under XR rig motion.
 - [ ] **Task U5.3: Selection frustum viz**
@@ -195,7 +195,9 @@ Document a fixed on-device path (e.g. app-accessible folder under Android scoped
   - [ ] Install-from-git works; samples import cleanly; CI builds/copies Windows + Android natives.
 - [ ] **Task U7.2: Demo scene completion**
   - [ ] Prefabs, bridge, documented Quest 2 setup in README quickstart.
-- [ ] **Task U7.3: Acceptance checklist (Quest 2)**
+- [ ] **Task U7.3: Text injection (deferred from 0.4)**
+  - [ ] Unity system keyboard / TMP / debug field → core text router → rename label updates.
+- [ ] **Task U7.4: Acceptance checklist (Quest 2)**
   - [ ] Half-Dome macro-target on empty far field.
   - [ ] Double-proxy micro-resolve + CREATE in empty voxels.
   - [ ] Portal teleport near ↔ far and cross-proxy.
@@ -218,7 +220,8 @@ Use this section for design notes, UX instincts, and “we’ll need this later�
 
 **Notes**
 
-- **Selection-gated telekinesis (far-field keep-alive).** Grip today both possesses and drives; releasing grip drops possession, so resting a hand after a long telekinesis throw loses control. Intended model: telekinesis is a short-distance drive on a *selected* object. Deselect disables it; while selected, grab can re-drive immediately even from far away (no re-acquire). Full OS would also allow parking a voodoo volume on the object, but selection→drive is the fast path so users are not forced into “move → voodoo → move → voodoo” for far-field play. *(Felt on Quest during 0.3 stick-velocity testing.)*
+- *(Selection-gated telekinesis promoted into Phase 0.4 Task U4.6.)*
+- [ ] **Glyph pack GUI (artist tool):** Simple GUI (Editor window and/or small desktop app) to generate `.3glyph` packs without CLI — pick GLB, fill association/tint fields, run inject. Mirrors core Post-1.0 tooling note; optional path for the deferred U4.2 Editor helper.
 
 ---
 

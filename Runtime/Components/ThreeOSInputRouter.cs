@@ -112,8 +112,12 @@ namespace ThreeOS
                 {
                     if (trigger != null) frame.leftTrigger = trigger.ReadValue();
                     if (grip != null) frame.leftGripValue = grip.ReadValue();
-                    if (primaryButton != null && primaryButton.isPressed)
+                    // Index trigger drives Select (selection / lattice); A/X still works as backup.
+                    var leftSelect = (trigger != null && trigger.ReadValue() >= 0.55f) ||
+                                     (primaryButton != null && primaryButton.isPressed);
+                    if (leftSelect)
                         frame.buttonFlags |= (uint)ButtonFlags.LeftSelect;
+                    // Grip still flags Grab for topology portals; storage drag uses trigger hold.
                     if (gripButton != null && gripButton.isPressed)
                         frame.buttonFlags |= (uint)ButtonFlags.LeftGrab;
                 }
@@ -121,8 +125,11 @@ namespace ThreeOS
                 {
                     if (trigger != null) frame.rightTrigger = trigger.ReadValue();
                     if (grip != null) frame.rightGripValue = grip.ReadValue();
-                    if (primaryButton != null && primaryButton.isPressed)
+                    var rightSelect = (trigger != null && trigger.ReadValue() >= 0.55f) ||
+                                      (primaryButton != null && primaryButton.isPressed);
+                    if (rightSelect)
                         frame.buttonFlags |= (uint)ButtonFlags.RightSelect;
+                    // Grip still flags Grab for topology portals; storage drag uses trigger hold.
                     if (gripButton != null && gripButton.isPressed)
                         frame.buttonFlags |= (uint)ButtonFlags.RightGrab;
                 }

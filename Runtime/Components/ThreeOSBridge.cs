@@ -160,6 +160,15 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_glyph_install_pack(byte[] bytes, uint byteCount);
 
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_selection_get(out ulong outEntityId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_selection_set(ulong entityId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void threeos_selection_clear();
+
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
         public uint NativeVersion { get; private set; }
@@ -637,6 +646,37 @@ namespace ThreeOS
                 LastError = ex.Message;
                 return false;
             }
+        }
+
+        public bool TryGetSelection(out ulong entityId)
+        {
+            entityId = 0;
+            if (!IsLoaded) return false;
+            try
+            {
+                if (threeos_selection_get(out entityId) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        public bool SetSelection(ulong entityId) =>
+            Call(() => threeos_selection_set(entityId));
+
+        public void ClearSelection()
+        {
+            if (!IsLoaded) return;
+            try { threeos_selection_clear(); }
+            catch (Exception ex) { LastError = ex.Message; }
         }
 
         public static string FormatVersion(uint packed)

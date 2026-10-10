@@ -95,6 +95,7 @@ namespace ThreeOS
             var storage = _storage != null
                 ? $"Storage:{(_storage.DemoActive ? "demo" : "off")} {_storage.Status}"
                 : "Storage: n/a";
+            var sel = _storage != null ? $"Sel:{_storage.SelectionLabel}" : "Sel:n/a";
             var text =
                 "3OS Phase 0.4\n" +
                 $"Plugin loaded: {_bridge.IsLoaded}\n" +
@@ -104,6 +105,7 @@ namespace ThreeOS
                 $"Track: 0x{flags:X}\n" +
                 $"{topo}\n" +
                 $"{storage}\n" +
+                $"{sel}\n" +
                 kin;
 
             if (!string.IsNullOrEmpty(_bridge.LastError))
