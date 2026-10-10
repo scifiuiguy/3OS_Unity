@@ -113,6 +113,53 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_kinematics_set_object_pose(ref ThreeOSPose objectPose);
 
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_workspace_item();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_snap_state();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_storage_event();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void threeos_storage_clear();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_add_object([MarshalAs(UnmanagedType.LPStr)] string name,
+            [MarshalAs(UnmanagedType.LPStr)] string relativePath, out ulong outEntityId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_add_box([MarshalAs(UnmanagedType.LPStr)] string name,
+            [MarshalAs(UnmanagedType.LPStr)] string relativePath, uint childCount, out ulong outEntityId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_layout_demo(ref ThreeOSPose headPose);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_storage_item_count();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_get_item(uint index, out InteropWorkspaceItem outItem);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_get_snap(out InteropSnapState outSnap);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_poll_event(out InteropStorageEvent outEvent);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_try_commit_insert();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_ack_event(int success);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_set_box_open(ulong boxId, int open);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_glyph_install_pack(byte[] bytes, uint byteCount);
+
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
         public uint NativeVersion { get; private set; }
@@ -154,6 +201,19 @@ namespace ThreeOS
                         threeos_sizeof_stick_debug() != InteropStructs.StickDebugBytes)
                     {
                         LastError = "Kinematics ABI size mismatch";
+                        IsLoaded = false;
+                        Debug.LogError($"[3OS] {LastError}");
+                        return;
+                    }
+                }
+
+                if (NativeAbiVersion >= 4)
+                {
+                    if (threeos_sizeof_workspace_item() != InteropStructs.WorkspaceItemBytes ||
+                        threeos_sizeof_snap_state() != InteropStructs.SnapStateBytes ||
+                        threeos_sizeof_storage_event() != InteropStructs.StorageEventBytes)
+                    {
+                        LastError = "Storage ABI size mismatch";
                         IsLoaded = false;
                         Debug.LogError($"[3OS] {LastError}");
                         return;
@@ -428,6 +488,156 @@ namespace ThreeOS
 
         public bool SetKinematicObjectPose(ThreeOSPose objectPose) =>
             Call(() => threeos_kinematics_set_object_pose(ref objectPose));
+
+        public void StorageClear()
+        {
+            if (!IsLoaded) return;
+            try { threeos_storage_clear(); }
+            catch (Exception ex) { LastError = ex.Message; }
+        }
+
+        public bool StorageAddObject(string name, string relativePath, out ulong entityId)
+        {
+            entityId = 0;
+            if (!IsLoaded) return false;
+            try
+            {
+                if (threeos_storage_add_object(name, relativePath, out entityId) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        public bool StorageAddBox(string name, string relativePath, uint childCount, out ulong entityId)
+        {
+            entityId = 0;
+            if (!IsLoaded) return false;
+            try
+            {
+                if (threeos_storage_add_box(name, relativePath, childCount, out entityId) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        public bool StorageLayoutDemo(ThreeOSPose headPose) =>
+            Call(() => threeos_storage_layout_demo(ref headPose));
+
+        public uint StorageItemCount()
+        {
+            if (!IsLoaded) return 0;
+            try { return threeos_storage_item_count(); }
+            catch { return 0; }
+        }
+
+        public bool TryGetWorkspaceItem(uint index, out InteropWorkspaceItem item)
+        {
+            item = default;
+            if (!IsLoaded) return false;
+            try
+            {
+                if (threeos_storage_get_item(index, out item) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        public bool TryGetSnap(out InteropSnapState snap)
+        {
+            snap = default;
+            if (!IsLoaded) return false;
+            try
+            {
+                if (threeos_storage_get_snap(out snap) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        public bool TryPollStorageEvent(out InteropStorageEvent ev)
+        {
+            ev = default;
+            if (!IsLoaded) return false;
+            try
+            {
+                if (threeos_storage_poll_event(out ev) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        public bool TryCommitInsert() => Call(threeos_storage_try_commit_insert);
+
+        public bool AckStorageEvent(bool success) =>
+            Call(() => threeos_storage_ack_event(success ? 1 : 0));
+
+        public bool SetBoxOpen(ulong boxId, bool open) =>
+            Call(() => threeos_storage_set_box_open(boxId, open ? 1 : 0));
+
+        public bool InstallGlyphPack(byte[] bytes)
+        {
+            if (!IsLoaded || bytes == null || bytes.Length == 0) return false;
+            try
+            {
+                if (threeos_glyph_install_pack(bytes, (uint)bytes.Length) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
 
         public static string FormatVersion(uint packed)
         {

@@ -11,6 +11,7 @@ namespace ThreeOS
         private ThreeOSInputRouter _inputRouter;
         private ThreeOSTopologyController _topology;
         private ThreeOSKinematicsController _kinematics;
+        private ThreeOSStorageController _storage;
         private TextMesh _label;
         private Transform _follow;
 
@@ -22,6 +23,8 @@ namespace ThreeOS
                         FindFirstObjectByType<ThreeOSTopologyController>();
             _kinematics = GetComponent<ThreeOSKinematicsController>() ??
                           FindFirstObjectByType<ThreeOSKinematicsController>();
+            _storage = GetComponent<ThreeOSStorageController>() ??
+                       FindFirstObjectByType<ThreeOSStorageController>();
             CreateWorldHud();
         }
 
@@ -89,14 +92,18 @@ namespace ThreeOS
             var kin = _kinematics != null
                 ? $"Kinetic:{_kinematics.Phase} {_kinematics.Status}"
                 : "Kinematics: n/a";
+            var storage = _storage != null
+                ? $"Storage:{(_storage.DemoActive ? "demo" : "off")} {_storage.Status}"
+                : "Storage: n/a";
             var text =
-                "3OS Phase 0.3\n" +
+                "3OS Phase 0.4\n" +
                 $"Plugin loaded: {_bridge.IsLoaded}\n" +
                 $"Native version: {ThreeOSBridge.FormatVersion(_bridge.NativeVersion)}\n" +
                 $"ABI version: {_bridge.NativeAbiVersion}\n" +
                 $"Ticks: {_bridge.TickCount} ok:{ticksOk}\n" +
                 $"Track: 0x{flags:X}\n" +
                 $"{topo}\n" +
+                $"{storage}\n" +
                 kin;
 
             if (!string.IsNullOrEmpty(_bridge.LastError))

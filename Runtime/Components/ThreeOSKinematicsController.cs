@@ -59,6 +59,14 @@ namespace ThreeOS
                 return;
             }
 
+            // Phase 0.4 storage demo owns grip for workspace glyphs (stick ray still via LateUpdate).
+            var storage = FindFirstObjectByType<ThreeOSStorageController>();
+            if (storage != null && storage.DemoActive)
+            {
+                SyncPhase();
+                return;
+            }
+
             // Portal lattice mode owns grip; kinematics yields.
             if (_topology != null && _topology.LatticeActive)
             {
@@ -141,7 +149,9 @@ namespace ThreeOS
 
         private void UpdateStickRay()
         {
-            if (!_possessing || _stickRay == null || _bridge == null || !_bridge.IsLoaded)
+            // Drive from kernel stick_debug (works for StorageController possess too —
+            // do not require this component's local _possessing flag).
+            if (_stickRay == null || _bridge == null || !_bridge.IsLoaded)
             {
                 HideStickRay();
                 return;

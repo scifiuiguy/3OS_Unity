@@ -23,7 +23,7 @@ Core 0.0 ──► Core 0.1 (small ABI freeze) ──► Core 0.2 … ──► 
 | **0.1** | Types + **frozen small ABI** + stub facade | Bridge + `InteropStructs` + input router + plugin load | Plugin loads; version/ping; frames marshal @ framerate |
 | **0.2** | Topology, Half-Dome, double-proxy, portals | Prefab visuals + apply remaps/teleports to scene objects | Dome → lattice → portal drag teleports a cube |
 | **0.3** | Velocity telekinesis + floor clamp | `ThreeOSMovable` applies kernel deltas | Wrist micro-glide + coast; floor holds |
-| **0.4** | Storage glyphs + host text ABI | Folder pick / injected text → spawn Boxes/Objects | Glyphs appear; rename via Unity text |
+| **0.4** | Glyph registry, Box insert + FS events, host text | Demo dir glyphs/labels; snap-insert anim; disk move | `simple.glb` + `Test1` Box; drop-in writes to disk |
 | **0.5** | Layouts, anchors, selection frustum | Gestures/UI to toggle modes + frustum viz | Matrix/cluster; multi-select; ego/allo switch |
 | **0.6** | Full enclosure planes + AI command ABI | `UnitySemanticMask` + command hook from host | Wall clip looks right; one voice/command action |
 | **1.0** | Native OpenXR path in core (parity) | UPM polish, samples, docs, CI binaries | Full demo scene acceptance (same checklist as core 1.0) |
@@ -101,16 +101,59 @@ Core 0.0 ──► Core 0.1 (small ABI freeze) ──► Core 0.2 … ──► 
 
 ### 📂 Phase 0.4: Glyphs & Host Text
 **Pairs with:** Core 0.4  
-**Goal:** Unity supplies FS listing / text; core maps glyphs and labels.
+**Goal:** Unity loads a minimal Quest test directory, draws typed glyphs + labels, supports drag-snap insert into a Box with open/closed anim, and write-through FS moves via kernel events.
 
-- [ ] **Task U4.1: Host file list**
-  - [ ] Feed a test directory listing across the host ABI (Quest sandbox–aware paths or Editor folder).
-- [ ] **Task U4.2: Glyph instantiation**
-  - [ ] Spawn Box/Object meshes from kernel glyph descriptors.
-- [ ] **Task U4.3: Text injection**
+**Host notes (see core 0.4 for package design)**  
+- `.3glyph` = GLB bytes + embedded `THREEOS_glyph` association metadata (single file).  
+- **Schema + pack JSON + injector live in core:** `docs/THREEOS_glyph.md`, `docs/glyph_packs/`, `tools/inject_3glyph.py`.  
+- Unity imports/renders meshes; kernel owns extension → glyph_id, snap/insert, and mutation events.  
+- Authored packs (Blender): glTF-logo glyph for `.glb`/`.gltf` **content**; `box` + `box_open` glyphs for Boxes.  
+- **Glyphs render semi-transparent** (alpha materials / URP Transparent). Not opaque blocks — see-through icons so the field stays readable behind them.
+
+**Quest demo directory (operator-staged before launch)**  
+Document a fixed on-device path (e.g. app-accessible folder under Android scoped storage / known Quest path). Operator places **only**:
+
+1. `simple.glb` — content payload (a real GLB file the glyph *represents*, not the glyph asset).  
+2. `Test1/` — empty folder.
+
+**Expected first paint**
+
+- `simple.glb` → Object glyph (glTF pack) with label **`simple.glb`** below.  
+- Beside it → Box glyph (closed `box`) with primary label **`Test1`** and secondary **`0 objects`**.
+
+**Drop-into-Box UX (host viz + anim; kernel snap/commit)**
+
+- Drag Object near Box within threshold → glyph snaps just above Box; show ↓ arrow icon under the name label (insert pending).  
+- **On snap:** kernel zeros Object velocity and re-anchors stick `start_hand` to the **current** hand pose (grip stays down — not a release). Pre-snap stick must not keep driving the Object. Same re-anchor on unsnap.  
+- Leave threshold → unsnap; hide arrow.  
+- Release while snapped → play sequence: swap Box mesh to `box_open` → scale bump **+10%** then return → swap back to closed `box`; Object glyph leaves the field; Box secondary label → **`1 object`**.  
+- Handle kernel `ObjectMovedIntoBox` (or equivalent): move `simple.glb` into `Test1/` on disk; report result so core can commit or roll back.
+
+- [ ] **Task U4.1: Demo directory wiring**
+  - [ ] Document agreed Quest test path; Editor fallback path for desk testing.
+  - [ ] On start, list that directory into the host ABI (expect `simple.glb` + `Test1` when staged correctly).
+  - [ ] Soft-fail HUD if listing empty/missing (prompt to stage files).
+- [ ] **Task U4.2: Glyph pack install**
+  - [ ] Ship sample packs under Samples/StreamingAssets: glTF-logo `.3glyph`, `box.3glyph`, `box_open.3glyph`; register with kernel at startup.
+  - [ ] Editor helper: `.glb` → inject `THREEOS_glyph` → `.3glyph` (optional).
+- [ ] **Task U4.3: Glyph + label instantiation**
+  - [ ] Spawn Object/Box visuals from kernel descriptors (`.3glyph` GLB load path; treat `.3glyph` as GLB).
+  - [ ] Force / preserve **semi-transparent** materials on glyph instances (do not upgrade imported GLB to opaque).
+  - [ ] World-space labels: Object name; Box name + smaller child-count line (labels stay opaque/readable).
+  - [ ] Layout: Object and Box side-by-side in the near field for the two-entry demo.
+- [ ] **Task U4.4: Drag, snap affordance, insert anim**
+  - [ ] Drive Object drag via existing possess/telekinesis or a 0.4 grab path; feed poses so kernel can evaluate Box proximity.
+  - [ ] When kernel reports insert-pending: snap visual to hold pose; show arrow under Object label (expect vel cleared / stick re-anchored in kernel — no host-side gain hacks).
+  - [ ] On commit event: play Box open → +10% bump → closed sequence; despawn/reparent Object glyph; refresh count label.
+- [ ] **Task U4.5: FS event sink**
+  - [ ] Subscribe to storage mutation events; perform Android/Editor file move into `Test1/`; ack success/failure to kernel.
+  - [ ] After success, re-list or trust kernel state so a relaunch shows `simple.glb` inside `Test1` (empty root aside from the Box).
+- [ ] **Task U4.6: Text injection**
   - [ ] Unity keyboard / TMP / debug field → core text router → rename label updates.
+- [ ] **Task U4.7: Association / demo smoke**
+  - [ ] Debug readout: glyph_id, snap state, child count; confirm content `.glb` uses glTF pack (not Box packs).
 
-**Quest gate:** Test folder populates as 3D glyphs; rename one object from Unity text input.
+**Quest gate:** Staged dir shows `simple.glb` glyph + `Test1` Box (`0 objects`); drag-snap shows arrow; release inserts with open/bump/close anim; file lands in `Test1/` on disk; Box shows `1 object`.
 
 ---
 

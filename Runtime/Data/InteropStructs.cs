@@ -9,13 +9,16 @@ namespace ThreeOS
     /// </summary>
     public static class InteropStructs
     {
-        public const uint AbiVersion = 3;
+        public const uint AbiVersion = 4;
         public const int InputFrameBytes = 192;
         public const int TransformDeltaBytes = 48;
         public const int DomeStateBytes = 48;
         public const int DoubleProxyStateBytes = 64;
         public const int KineticStateBytes = 48;
         public const int StickDebugBytes = 64;
+        public const int WorkspaceItemBytes = 200;
+        public const int SnapStateBytes = 64;
+        public const int StorageEventBytes = 344;
 
         public static void AssertLayout()
         {
@@ -25,12 +28,18 @@ namespace ThreeOS
             var proxySize = Marshal.SizeOf<InteropDoubleProxyState>();
             var kineticSize = Marshal.SizeOf<InteropKineticState>();
             var stickDebugSize = Marshal.SizeOf<InteropStickDebug>();
+            var workspaceSize = Marshal.SizeOf<InteropWorkspaceItem>();
+            var snapSize = Marshal.SizeOf<InteropSnapState>();
+            var storageEventSize = Marshal.SizeOf<InteropStorageEvent>();
             Debug.Assert(inputSize == InputFrameBytes, $"InteropInputFrame size {inputSize} != {InputFrameBytes}");
             Debug.Assert(deltaSize == TransformDeltaBytes, $"InteropTransformDelta size {deltaSize} != {TransformDeltaBytes}");
             Debug.Assert(domeSize == DomeStateBytes, $"InteropDomeState size {domeSize} != {DomeStateBytes}");
             Debug.Assert(proxySize == DoubleProxyStateBytes, $"InteropDoubleProxyState size {proxySize} != {DoubleProxyStateBytes}");
             Debug.Assert(kineticSize == KineticStateBytes, $"InteropKineticState size {kineticSize} != {KineticStateBytes}");
             Debug.Assert(stickDebugSize == StickDebugBytes, $"InteropStickDebug size {stickDebugSize} != {StickDebugBytes}");
+            Debug.Assert(workspaceSize == WorkspaceItemBytes, $"InteropWorkspaceItem size {workspaceSize} != {WorkspaceItemBytes}");
+            Debug.Assert(snapSize == SnapStateBytes, $"InteropSnapState size {snapSize} != {SnapStateBytes}");
+            Debug.Assert(storageEventSize == StorageEventBytes, $"InteropStorageEvent size {storageEventSize} != {StorageEventBytes}");
         }
 
         /// <summary>Unity left-handed Y-up → OpenXR right-handed Y-up.</summary>
@@ -229,5 +238,65 @@ namespace ThreeOS
         public uint reserved0;
         public uint reserved1;
         public uint reserved2;
+    }
+
+    /// <summary>CharSet.Ansi + ByValTStr matches native char[] (IL2CPP-safe vs ByValArray).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4, CharSet = CharSet.Ansi)]
+    public struct InteropWorkspaceItem
+    {
+        public ulong entityId;
+        public uint kind;
+        public uint flags;
+        public ThreeOSPose pose;
+        public uint childCount;
+        public uint boxVisual;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+        public string name;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string secondaryLabel;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string glyphId;
+        public float tintR;
+        public float tintG;
+        public float tintB;
+        public float tintA;
+        public uint reserved0;
+
+        public string Name => name ?? string.Empty;
+        public string SecondaryLabel => secondaryLabel ?? string.Empty;
+        public string GlyphId => glyphId ?? string.Empty;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropSnapState
+    {
+        public uint pending;
+        public uint reserved0;
+        public ulong objectId;
+        public ulong boxId;
+        public ThreeOSPose holdPose;
+        public uint reserved1;
+        public uint reserved2;
+        public uint reserved3;
+    }
+
+    /// <summary>
+    /// CharSet.Ansi + ByValTStr matches native char[160] paths (IL2CPP-safe).
+    /// Prefer this over ByValArray byte[] which often arrives empty on Android.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4, CharSet = CharSet.Ansi)]
+    public struct InteropStorageEvent
+    {
+        public uint type;
+        public uint awaitingAck;
+        public ulong objectId;
+        public ulong boxId;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 160)]
+        public string sourceRel;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 160)]
+        public string destRel;
+
+        public string SourceRel => sourceRel ?? string.Empty;
+        public string DestRel => destRel ?? string.Empty;
     }
 }
