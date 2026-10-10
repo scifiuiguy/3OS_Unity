@@ -15,32 +15,48 @@ namespace ThreeOS
         public const string DemoFolderName = "3OS_Demo";
         /// <summary>Glyph visual size in meters (matches Blender-authored 0.1 m packs).</summary>
         public const float GlyphSizeM = 0.1f;
+        /// <summary>Dismiss-X sphere diameter (meters).</summary>
+        public const float DismissXDiameterM = 0.06f;
         public float PossessDistance = 0.45f;
         /// <summary>Trigger held at least this long starts drag (telekinesis); shorter tap selects.</summary>
         public float TriggerHoldDragSeconds = 0.22f;
         public float TriggerAxisThreshold = 0.55f;
+        /// <summary>Second short trigger on the same Box within this window opens it.</summary>
+        public float BoxDoubleTapSeconds = 0.4f;
+        public float BoxExpandAnimSeconds = 0.3f;
+        /// <summary>World +up offset for dismiss X above the parent box.</summary>
+        public float BoxDismissXOffsetM = 0.053333f;
 
         [Header("Glyph selection glow (ThreeOS/Glyph)")]
         [Tooltip("Look-dev asset (Create → 3OS → Glyph Glow Settings). Per-glyph base tint is separate.")]
         public ThreeOSGlyphGlowSettings GlyphGlowSettings;
+
+        private static readonly Color ExpandHoverGlowColor = new Color(0.45f, 0.75f, 1f, 1f);
 
         private ThreeOSBridge _bridge;
         private ThreeOSInputRouter _input;
         private ThreeOSTopologyController _topology;
 
         private readonly Dictionary<ulong, GlyphView> _views = new Dictionary<ulong, GlyphView>();
+        private readonly Dictionary<ulong, ExpandedBoxUi> _expandedBoxes = new Dictionary<ulong, ExpandedBoxUi>();
+        private readonly HashSet<ulong> _animLockedIds = new HashSet<ulong>();
         private ThreeOSArrowVisual _insertArrow;
         private bool _triggerWasDown;
         private float _triggerDownTime;
         private bool _triggerDragActive;
+        private bool _triggerGestureConsumed;
         private bool _possessing;
         private ulong _possessedId;
         private bool _insertAnimBusy;
+        private bool _boxAnimBusy;
+        private ulong _lastShortTapId;
+        private float _lastShortTapTime = -10f;
         private string _status = "storage idle";
         private string _demoRoot = string.Empty;
         private ThreeOSPose _layoutHeadPose;
         private bool _waitingForAllFilesAccess;
         private string _selectionLabel = "none";
+        private ulong _xHoverBoxId;
 
         // All Boxes share one ThreeOS/Glyph material; selection is _Selected via MPB.
         private Material _sharedBoxMaterial;
@@ -76,6 +92,16 @@ namespace ThreeOS
             public Material Material;
             /// <summary>False for shared Box material — do not Destroy on view teardown.</summary>
             public bool OwnsMaterial;
+        }
+
+        private sealed class ExpandedBoxUi
+        {
+            public ulong BoxId;
+            public readonly List<ulong> ChildIds = new List<ulong>();
+            public GameObject XRoot;
+            public Transform XVisual;
+            /// <summary>Sticky hover (distance hysteresis); not physics/colliders.</summary>
+            public bool Hovered;
         }
 
         private void Awake()
@@ -295,6 +321,7 @@ namespace ThreeOS
 
             SyncViewsFromKernel();
             HandleTriggerSelectAndDrag();
+            UpdateExpandedDismissAffordances();
             SyncSelectionMaterials();
             UpdateInsertArrow();
             HandleStorageEvents();
@@ -834,37 +861,71 @@ namespace ThreeOS
         }
 
         /// <summary>
-        /// Tally files inside a box folder. Uses Java listing on Android when .NET returns 0
-        /// (common for MTP/Documents), and also checks the alternate demo root.
+        /// Tally direct children (files + subfolders) inside a box folder. Unions all demo
+        /// roots and uses Java listing on Android when .NET under-reports (MTP/Documents).
         /// </summary>
         private uint CountFolderContents(string dirPath, string folderName, string primaryRoot)
         {
-            var count = ThreeOSAndroidStorage.CountFilesInDirectory(dirPath);
-            if (count > 0)
+            var names = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            void AddFrom(string folder)
             {
-                return count;
+                if (string.IsNullOrEmpty(folder))
+                {
+                    return;
+                }
+
+                foreach (var file in ThreeOSAndroidStorage.ListFileNames(folder))
+                {
+                    names.Add(file);
+                }
+
+                foreach (var dir in ThreeOSAndroidStorage.ListDirectoryNames(folder))
+                {
+                    names.Add(dir);
+                }
             }
 
-            foreach (var altRoot in CandidateDemoRoots())
+            AddFrom(dirPath);
+            foreach (var candidateRoot in CandidateDemoRoots())
             {
-                if (string.Equals(altRoot, primaryRoot, System.StringComparison.OrdinalIgnoreCase))
+                if (string.IsNullOrEmpty(candidateRoot))
                 {
                     continue;
                 }
 
-                var alt = Path.Combine(altRoot, folderName);
-                var altCount = ThreeOSAndroidStorage.CountFilesInDirectory(alt);
-                if (altCount > count)
+                AddFrom(Path.Combine(candidateRoot, folderName));
+            }
+
+            // Nested paths (box/sub) — also probe under each root with the relative suffix.
+            if (!string.IsNullOrEmpty(dirPath) && !string.IsNullOrEmpty(primaryRoot) &&
+                dirPath.StartsWith(primaryRoot, System.StringComparison.OrdinalIgnoreCase))
+            {
+                var rel = dirPath.Substring(primaryRoot.Length)
+                    .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (!string.IsNullOrEmpty(rel) &&
+                    !string.Equals(rel, folderName, System.StringComparison.OrdinalIgnoreCase))
                 {
-                    count = altCount;
+                    foreach (var candidateRoot in CandidateDemoRoots())
+                    {
+                        if (string.IsNullOrEmpty(candidateRoot))
+                        {
+                            continue;
+                        }
+
+                        AddFrom(Path.Combine(candidateRoot, rel));
+                    }
                 }
             }
 
-            return count;
+            return (uint)names.Count;
         }
 
         private void RebuildViews()
         {
+            // Insert/rebuild destroys glyph Roots; expanded UI must not keep X / ChildIds
+            // pointing at destroyed objects (Quest MissingReference crash).
+            TeardownAllExpandedBoxes(collapseKernel: true);
+
             foreach (var kv in _views)
             {
                 DestroyGlyphView(kv.Value);
@@ -912,7 +973,8 @@ namespace ThreeOS
             var mr = visual.GetComponent<MeshRenderer>();
             ResolveGlyphMaterial(item, out var mat, out var ownsMaterial);
             mr.sharedMaterial = mat;
-            ApplyGlyphSelection(mr, selected: false, GlyphBaseColor(item));
+            mr.allowOcclusionWhenDynamic = false;
+            ApplyGlyphSelection(mr, rimOn: false, GlyphBaseColor(item), null, ownsMaterial ? mat : null);
 
             var unityPose = InteropStructs.ToUnityPose(item.pose);
             go.transform.SetPositionAndRotation(unityPose.position, unityPose.rotation);
@@ -981,7 +1043,7 @@ namespace ThreeOS
             }
 
             _sharedBoxMaterial = MakeGlyphMaterialForColor(new Color(0.55f, 0.36f, 0.18f, 0.55f),
-                enableInstancing: true);
+                enableInstancing: false);
             _sharedBoxMaterial.name = "3OS_SharedBoxGlyph";
         }
 
@@ -1073,7 +1135,18 @@ namespace ThreeOS
             return mat;
         }
 
-        private void ApplyGlyphSelection(MeshRenderer renderer, bool selected, Color baseColor)
+        /// <param name="rimOn">
+        /// Shader rim gate only (property still named <c>_Selected</c>). Not ABI selection.
+        /// True for white ABI-select <em>or</em> blue X-hover — same Fresnel, different
+        /// <c>_GlowColor</c>.
+        /// </param>
+        /// <param name="ownedMaterial">
+        /// When non-null, also write highlight onto the material instance. MPB alone can
+        /// hard-drop the rim gate when a renderer is culled/batched (multi blue hover);
+        /// single white select usually stays on-screen so it never showed the bug.
+        /// </param>
+        private void ApplyGlyphSelection(MeshRenderer renderer, bool rimOn, Color baseColor,
+            Color? glowOverride = null, Material ownedMaterial = null)
         {
             if (renderer == null)
             {
@@ -1081,18 +1154,65 @@ namespace ThreeOS
             }
 
             _glyphMpb ??= new MaterialPropertyBlock();
+            // Do not GetPropertyBlock — merging culled/stale blocks was flipping the rim gate.
+            _glyphMpb.Clear();
 
-            // Push selection + glow through MPB so Quest cannot miss material-only floats.
-            renderer.GetPropertyBlock(_glyphMpb);
-            _glyphMpb.SetFloat(SelectedProp, selected ? 1f : 0f);
+            var glow = glowOverride ?? ResolvedGlowColor;
+            var rim01 = rimOn ? 1f : 0f;
+            _glyphMpb.SetFloat(SelectedProp, rim01);
             _glyphMpb.SetColor(BaseColorProp, baseColor);
-            _glyphMpb.SetColor(GlowColorProp, ResolvedGlowColor);
+            _glyphMpb.SetColor(GlowColorProp, glow);
             _glyphMpb.SetFloat(GlowIntensityProp, ResolvedGlowIntensity);
             _glyphMpb.SetFloat(GlowPowerProp, ResolvedGlowPower);
             _glyphMpb.SetFloat(GlowWidthProp, ResolvedGlowWidth);
             _glyphMpb.SetFloat(GlowBoostProp, ResolvedGlowBoost);
             _glyphMpb.SetFloat(GlowViewMixProp, ResolvedGlowViewMix);
             renderer.SetPropertyBlock(_glyphMpb);
+
+            if (ownedMaterial == null)
+            {
+                return;
+            }
+
+            if (ownedMaterial.HasProperty(SelectedProp))
+            {
+                ownedMaterial.SetFloat(SelectedProp, rim01);
+            }
+
+            if (ownedMaterial.HasProperty(BaseColorProp))
+            {
+                ownedMaterial.SetColor(BaseColorProp, baseColor);
+            }
+
+            if (ownedMaterial.HasProperty(GlowColorProp))
+            {
+                ownedMaterial.SetColor(GlowColorProp, glow);
+            }
+
+            if (ownedMaterial.HasProperty(GlowIntensityProp))
+            {
+                ownedMaterial.SetFloat(GlowIntensityProp, ResolvedGlowIntensity);
+            }
+
+            if (ownedMaterial.HasProperty(GlowPowerProp))
+            {
+                ownedMaterial.SetFloat(GlowPowerProp, ResolvedGlowPower);
+            }
+
+            if (ownedMaterial.HasProperty(GlowWidthProp))
+            {
+                ownedMaterial.SetFloat(GlowWidthProp, ResolvedGlowWidth);
+            }
+
+            if (ownedMaterial.HasProperty(GlowBoostProp))
+            {
+                ownedMaterial.SetFloat(GlowBoostProp, ResolvedGlowBoost);
+            }
+
+            if (ownedMaterial.HasProperty(GlowViewMixProp))
+            {
+                ownedMaterial.SetFloat(GlowViewMixProp, ResolvedGlowViewMix);
+            }
         }
 
         private static Color GlyphBaseColor(InteropWorkspaceItem item)
@@ -1133,7 +1253,9 @@ namespace ThreeOS
             if (view.Renderer != null)
             {
                 view.Renderer.sharedMaterial = view.Material;
-                ApplyGlyphSelection(view.Renderer, selected: false, GlyphBaseColor(item));
+                view.Renderer.allowOcclusionWhenDynamic = false;
+                ApplyGlyphSelection(view.Renderer, rimOn: false, GlyphBaseColor(item), null,
+                    ownsMaterial ? mat : null);
             }
         }
 
@@ -1157,8 +1279,74 @@ namespace ThreeOS
             }
         }
 
+        /// <summary>
+        /// Drop expand UI (X + ChildIds). Optionally collapse kernel so siblings leave the field.
+        /// Required before RebuildViews / insert so destroyed Roots are never referenced.
+        /// </summary>
+        private void TeardownAllExpandedBoxes(bool collapseKernel)
+        {
+            if (_expandedBoxes.Count == 0)
+            {
+                _xHoverBoxId = 0;
+                _animLockedIds.Clear();
+                return;
+            }
+
+            var boxIds = new List<ulong>(_expandedBoxes.Keys);
+            foreach (var boxId in boxIds)
+            {
+                if (!_expandedBoxes.TryGetValue(boxId, out var ui))
+                {
+                    continue;
+                }
+
+                if (ui.XRoot != null)
+                {
+                    Destroy(ui.XRoot);
+                    ui.XRoot = null;
+                }
+
+                if (collapseKernel && _bridge != null && _bridge.IsLoaded)
+                {
+                    _bridge.CollapseBox(boxId);
+                    _bridge.SetBoxOpen(boxId, false);
+                }
+            }
+
+            _expandedBoxes.Clear();
+            _xHoverBoxId = 0;
+            _animLockedIds.Clear();
+        }
+
+        private static string CombineRootRel(string root, string rel)
+        {
+            if (string.IsNullOrEmpty(root))
+            {
+                return rel ?? string.Empty;
+            }
+
+            if (string.IsNullOrEmpty(rel))
+            {
+                return root;
+            }
+
+            var path = root;
+            foreach (var part in NormalizeDemoRel(rel).Split('/'))
+            {
+                if (part.Length == 0)
+                {
+                    continue;
+                }
+
+                path = Path.Combine(path, part);
+            }
+
+            return path;
+        }
+
         private void OnDestroy()
         {
+            TeardownAllExpandedBoxes(collapseKernel: false);
             if (_sharedBoxMaterial != null)
             {
                 Destroy(_sharedBoxMaterial);
@@ -1222,11 +1410,12 @@ namespace ThreeOS
 
                 seen.Add(item.entityId);
                 var inField = (item.flags & 1u) != 0;
+                var animLocked = _animLockedIds.Contains(item.entityId);
                 if (!inField)
                 {
                     if (_views.TryGetValue(item.entityId, out var hide))
                     {
-                        if (hide.Root != null)
+                        if (hide.Root != null && !animLocked)
                         {
                             hide.Root.SetActive(false);
                         }
@@ -1244,8 +1433,9 @@ namespace ThreeOS
                 view.Root.SetActive(true);
                 // While kernel kinematics drives this entity (possess or coast), Movable owns pose.
                 // Overwriting from workspace here caused post-release snaps to a stale layout pose.
+                // Expand/collapse cluster tween also owns pose until the anim node is destroyed.
                 var kineticDriven = IsKinematicallyDriven(item.entityId);
-                if (!kineticDriven)
+                if (!kineticDriven && !animLocked)
                 {
                     var pose = InteropStructs.ToUnityPose(item.pose);
                     view.Root.transform.SetPositionAndRotation(pose.position, pose.rotation);
@@ -1290,8 +1480,9 @@ namespace ThreeOS
         }
 
         /// <summary>
-        /// Index trigger: short tap = select/deselect; hold = telekinesis drag.
-        /// Grip/grab no longer drives storage possess (topology may still use Grab for portals).
+        /// Index trigger: short tap = select/deselect; double short on Box = expand;
+        /// hold = telekinesis drag. X dismiss consumes the gesture. Grip/grab no longer
+        /// drives storage possess (topology may still use Grab for portals).
         /// </summary>
         private void HandleTriggerSelectAndDrag()
         {
@@ -1304,6 +1495,7 @@ namespace ThreeOS
 
                 _triggerWasDown = false;
                 _triggerDragActive = false;
+                _triggerGestureConsumed = false;
                 return;
             }
 
@@ -1317,9 +1509,15 @@ namespace ThreeOS
             {
                 _triggerDownTime = Time.unscaledTime;
                 _triggerDragActive = false;
+                _triggerGestureConsumed = false;
+                if (TryBeginCloseOnXHover())
+                {
+                    _triggerGestureConsumed = true;
+                }
             }
 
-            if (triggerDown && _triggerWasDown && !_triggerDragActive && !_possessing)
+            if (triggerDown && _triggerWasDown && !_triggerDragActive && !_possessing &&
+                !_triggerGestureConsumed)
             {
                 if (Time.unscaledTime - _triggerDownTime >= TriggerHoldDragSeconds)
                 {
@@ -1330,7 +1528,11 @@ namespace ThreeOS
 
             if (!triggerDown && _triggerWasDown)
             {
-                if (_triggerDragActive || _possessing)
+                if (_triggerGestureConsumed)
+                {
+                    // X close (or other consumed press) — do not select/drag.
+                }
+                else if (_triggerDragActive || _possessing)
                 {
                     if (_possessing)
                     {
@@ -1339,14 +1541,48 @@ namespace ThreeOS
                 }
                 else
                 {
-                    // Short press: select hit glyph or clear on miss.
-                    ApplySelectAtAim(aimUnity.position, aimUnity.rotation * Vector3.forward);
+                    // Short press: double-tap Box opens; else select hit glyph or clear.
+                    HandleShortTriggerTap(aimUnity.position, aimUnity.rotation * Vector3.forward);
                 }
 
                 _triggerDragActive = false;
+                _triggerGestureConsumed = false;
             }
 
             _triggerWasDown = triggerDown;
+        }
+
+        private void HandleShortTriggerTap(Vector3 rayOrigin, Vector3 rayDir)
+        {
+            if (_boxAnimBusy)
+            {
+                return;
+            }
+
+            if (!TryHitTestYawAligned(rayOrigin, rayDir, out var hitId))
+            {
+                _lastShortTapId = 0;
+                ApplySelectAtAim(rayOrigin, rayDir);
+                return;
+            }
+
+            var now = Time.unscaledTime;
+            var isBox = TryFindItem(hitId, out var hitItem) && hitItem.kind == 1;
+            var doubleTap = isBox && hitId == _lastShortTapId &&
+                            (now - _lastShortTapTime) <= BoxDoubleTapSeconds &&
+                            !_expandedBoxes.ContainsKey(hitId);
+
+            if (doubleTap)
+            {
+                _lastShortTapId = 0;
+                _lastShortTapTime = -10f;
+                StartCoroutine(OpenBoxSequence(hitId));
+                return;
+            }
+
+            _lastShortTapId = hitId;
+            _lastShortTapTime = now;
+            ApplySelectAtAim(rayOrigin, rayDir);
         }
 
         private void ApplySelectAtAim(Vector3 rayOrigin, Vector3 rayDir)
@@ -1595,6 +1831,16 @@ namespace ThreeOS
                 _selectionLabel = selectedItem.Name;
             }
 
+            HashSet<ulong> blueChildren = null;
+            if (_xHoverBoxId != 0 && _expandedBoxes.TryGetValue(_xHoverBoxId, out var hoverUi))
+            {
+                blueChildren = new HashSet<ulong>(hoverUi.ChildIds);
+                foreach (var id in CollectChildIds(_xHoverBoxId))
+                {
+                    blueChildren.Add(id);
+                }
+            }
+
             foreach (var kv in _views)
             {
                 var view = kv.Value;
@@ -1603,15 +1849,21 @@ namespace ThreeOS
                     continue;
                 }
 
-                var selected = selectedId != 0 && kv.Key == selectedId &&
-                               view.Root != null && view.Root.activeInHierarchy;
+                // ABI selection (kernel) vs rim-on (shader). Blue X-hover is not selected.
+                var abiSelected = selectedId != 0 && kv.Key == selectedId;
+                var blueHover = blueChildren != null && blueChildren.Contains(kv.Key);
+                var rimOn = abiSelected || blueHover;
+                var owned = view.OwnsMaterial ? view.Material : null;
                 if (!TryFindItem(kv.Key, out var item))
                 {
-                    ApplyGlyphSelection(view.Renderer, selected, Color.white);
+                    ApplyGlyphSelection(view.Renderer, rimOn, Color.white,
+                        blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
                     continue;
                 }
 
-                ApplyGlyphSelection(view.Renderer, selected, GlyphBaseColor(item));
+                // Identical rim path to white select; only _GlowColor becomes blue.
+                ApplyGlyphSelection(view.Renderer, rimOn, GlyphBaseColor(item),
+                    blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
             }
         }
 
@@ -1689,6 +1941,9 @@ namespace ThreeOS
             var dst = string.Empty;
             try
             {
+                // Dropping a child from an open cluster invalidates expand UI before views move.
+                TeardownAllExpandedBoxes(collapseKernel: true);
+
                 // Always play open / bump / close first.
                 if (_views.TryGetValue(ev.boxId, out var boxView) && boxView.Root != null)
                 {
@@ -1704,10 +1959,12 @@ namespace ThreeOS
                     yield return null;
                 }
 
-                ResolveInsertNames(ev, out var objName, out var boxName);
+                ResolveInsertPaths(ev, out var objName, out var boxName, out var sourceRel,
+                    out var destRel);
                 var sourceIsBox = TryFindItem(ev.objectId, out var srcItem) && srcItem.kind == 1;
                 _status = $"moving {objName} → {boxName}/";
-                yield return CommitInsertToDisk(objName, boxName, sourceIsBox, result =>
+                yield return CommitInsertToDisk(objName, boxName, sourceIsBox, sourceRel, destRel,
+                    result =>
                 {
                     ok = result.ok;
                     src = result.src;
@@ -1736,10 +1993,18 @@ namespace ThreeOS
             RebuildViews();
         }
 
-        private void ResolveInsertNames(InteropStorageEvent ev, out string objName, out string boxName)
+        /// <summary>
+        /// Resolve leaf names plus full relative paths for FS cut. Nested children
+        /// (e.g. <c>Parent/ChildBox</c>) must not be treated as root-level names.
+        /// </summary>
+        private void ResolveInsertPaths(InteropStorageEvent ev, out string objName, out string boxName,
+            out string sourceRel, out string destRel)
         {
             objName = string.Empty;
             boxName = string.Empty;
+            sourceRel = string.Empty;
+            destRel = string.Empty;
+
             if (TryFindItem(ev.objectId, out var obj) && !string.IsNullOrEmpty(obj.Name))
             {
                 objName = obj.Name;
@@ -1750,37 +2015,66 @@ namespace ThreeOS
                 boxName = box.Name;
             }
 
-            // Prefer event paths only when they look like sane relative demo paths.
             if (!string.IsNullOrEmpty(ev.SourceRel))
             {
-                var name = Path.GetFileName(ev.SourceRel.Replace('\\', '/'));
-                if (!string.IsNullOrEmpty(name) &&
-                    name.EndsWith(".glb", System.StringComparison.OrdinalIgnoreCase))
+                sourceRel = NormalizeDemoRel(ev.SourceRel);
+                var leaf = Path.GetFileName(sourceRel.Replace('\\', '/'));
+                if (!string.IsNullOrEmpty(leaf))
                 {
-                    objName = name;
+                    objName = leaf;
                 }
+            }
+            else if (!string.IsNullOrEmpty(objName))
+            {
+                sourceRel = objName;
             }
 
             if (!string.IsNullOrEmpty(ev.DestRel))
             {
-                var norm = ev.DestRel.Replace('\\', '/').TrimEnd('/');
+                destRel = NormalizeDemoRel(ev.DestRel);
+                var norm = destRel.Replace('\\', '/');
                 var slash = norm.LastIndexOf('/');
                 if (slash > 0)
                 {
                     var folder = norm.Substring(0, slash);
                     var leaf = norm.Substring(slash + 1);
-                    if (!string.IsNullOrEmpty(folder) && folder.IndexOf('/') < 0)
+                    if (!string.IsNullOrEmpty(folder))
                     {
+                        // Destination parent may itself be nested (box/sub).
                         boxName = folder;
                     }
 
-                    if (!string.IsNullOrEmpty(leaf) &&
-                        leaf.EndsWith(".glb", System.StringComparison.OrdinalIgnoreCase))
+                    if (!string.IsNullOrEmpty(leaf))
                     {
                         objName = leaf;
                     }
                 }
             }
+            else if (!string.IsNullOrEmpty(boxName) && !string.IsNullOrEmpty(objName))
+            {
+                destRel = $"{boxName}/{objName}";
+            }
+
+            if (string.IsNullOrEmpty(sourceRel) && !string.IsNullOrEmpty(objName))
+            {
+                sourceRel = objName;
+            }
+
+            if (string.IsNullOrEmpty(destRel) && !string.IsNullOrEmpty(boxName) &&
+                !string.IsNullOrEmpty(objName))
+            {
+                destRel = $"{boxName}/{objName}";
+            }
+        }
+
+        private static string NormalizeDemoRel(string rel)
+        {
+            if (string.IsNullOrEmpty(rel))
+            {
+                return string.Empty;
+            }
+
+            return rel.Replace('\\', '/').Trim().Trim('/');
         }
 
         private struct InsertFsResult
@@ -1793,10 +2087,10 @@ namespace ThreeOS
         /// <summary>
         /// Write-through insert: cut within each demo root (Documents first on Quest so the
         /// MTP-visible original is renamed, not copied). Then scrub every root-level leftover.
-        /// Supports file Objects and folder Boxes (box-into-box).
+        /// Supports file Objects and folder Boxes (box-into-box), including nested rel paths.
         /// </summary>
         private IEnumerator CommitInsertToDisk(string objName, string boxName, bool sourceIsBox,
-            System.Action<InsertFsResult> done)
+            string sourceRel, string destRel, System.Action<InsertFsResult> done)
         {
             var result = new InsertFsResult
             {
@@ -1805,6 +2099,11 @@ namespace ThreeOS
                 dst = string.Empty,
             };
 
+            sourceRel = string.IsNullOrEmpty(sourceRel) ? objName : NormalizeDemoRel(sourceRel);
+            destRel = string.IsNullOrEmpty(destRel)
+                ? NormalizeDemoRel($"{boxName}/{objName}")
+                : NormalizeDemoRel(destRel);
+
             var docs = PreferredDocumentsDemoPath();
             var persistent = FallbackPersistentDemoPath();
             var writeRoot = string.IsNullOrEmpty(_demoRoot) ? persistent : _demoRoot;
@@ -1812,7 +2111,11 @@ namespace ThreeOS
             try
             {
                 Directory.CreateDirectory(writeRoot);
-                Directory.CreateDirectory(Path.Combine(writeRoot, boxName));
+                var destParent = Path.GetDirectoryName(CombineRootRel(writeRoot, destRel));
+                if (!string.IsNullOrEmpty(destParent))
+                {
+                    Directory.CreateDirectory(destParent);
+                }
             }
             catch (System.Exception ex)
             {
@@ -1821,12 +2124,12 @@ namespace ThreeOS
                 yield break;
             }
 
-            result.dst = Path.Combine(writeRoot, boxName, objName);
-            result.src = Path.Combine(writeRoot, objName);
+            result.dst = CombineRootRel(writeRoot, destRel);
+            result.src = CombineRootRel(writeRoot, sourceRel);
 
             if (sourceIsBox)
             {
-                yield return CommitInsertFolderToDisk(objName, boxName, docs, persistent, writeRoot,
+                yield return CommitInsertFolderToDisk(sourceRel, destRel, docs, persistent, writeRoot,
                     result, done);
                 yield break;
             }
@@ -1835,8 +2138,12 @@ namespace ThreeOS
             string loadedFrom = null;
 
             // Prefer reading from Documents (what the user browses), then persistent, then seed.
+            // Nested children use sourceRel (e.g. Parent/child.glb), not root leaf alone.
             foreach (var candidate in new[]
                      {
+                         CombineRootRel(docs, sourceRel),
+                         CombineRootRel(persistent, sourceRel),
+                         CombineRootRel(writeRoot, sourceRel),
                          Path.Combine(docs, objName),
                          Path.Combine(persistent, objName),
                          Path.Combine(writeRoot, objName),
@@ -1867,22 +2174,30 @@ namespace ThreeOS
             {
                 foreach (var root in CandidateDemoRoots())
                 {
-                    var candidate = Path.Combine(root, objName);
-                    if (!FileLooksPresent(candidate))
+                    foreach (var rel in new[] { sourceRel, objName })
                     {
-                        continue;
+                        var candidate = CombineRootRel(root, rel);
+                        if (!FileLooksPresent(candidate))
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            data = File.ReadAllBytes(candidate);
+                            loadedFrom = candidate;
+                            result.src = candidate;
+                            break;
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Debug.LogWarning($"[3OS] read {candidate}: {ex.Message}");
+                        }
                     }
 
-                    try
+                    if (data != null && data.Length > 0)
                     {
-                        data = File.ReadAllBytes(candidate);
-                        loadedFrom = candidate;
-                        result.src = candidate;
                         break;
-                    }
-                    catch (System.Exception ex)
-                    {
-                        Debug.LogWarning($"[3OS] read {candidate}: {ex.Message}");
                     }
                 }
             }
@@ -1929,7 +2244,7 @@ namespace ThreeOS
                 yield break;
             }
 
-            var docsSrc = Path.Combine(docs, objName);
+            var docsSrc = CombineRootRel(docs, sourceRel);
             var needsDocumentsCut = FileLooksPresent(docsSrc) ||
                                     string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase) ||
                                     (loadedFrom != null && loadedFrom.StartsWith(docs,
@@ -1956,47 +2271,58 @@ namespace ThreeOS
             var cutDocs = false;
             if (ThreeOSAndroidStorage.IsExternalStorageManager())
             {
-                cutDocs = TryCutRootFile(docs, objName, boxName, data);
+                cutDocs = TryCutRelFile(docs, sourceRel, destRel, data);
             }
 
-            var cutPers = TryCutRootFile(persistent, objName, boxName, data);
+            var cutPers = TryCutRelFile(persistent, sourceRel, destRel, data);
             if (!string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(writeRoot, persistent, System.StringComparison.OrdinalIgnoreCase))
             {
-                TryCutRootFile(writeRoot, objName, boxName, data);
+                TryCutRelFile(writeRoot, sourceRel, destRel, data);
             }
 
-            var docsDst = Path.Combine(docs, boxName, objName);
-            var persDst = Path.Combine(persistent, boxName, objName);
+            var docsDst = CombineRootRel(docs, destRel);
+            var persDst = CombineRootRel(persistent, destRel);
             var destLanded = DestFileOk(docsDst) || DestFileOk(persDst) || DestFileOk(result.dst);
 
             if (DestFileOk(docsDst))
             {
                 result.dst = docsDst;
-                result.src = Path.Combine(docs, objName);
+                result.src = docsSrc;
             }
             else if (DestFileOk(persDst))
             {
                 result.dst = persDst;
-                result.src = Path.Combine(persistent, objName);
+                result.src = CombineRootRel(persistent, sourceRel);
             }
 
             result.ok = cutDocs || cutPers || destLanded;
             Debug.Log(
                 $"[3OS] insert cut docs={cutDocs} pers={cutPers} destOk={destLanded} from={loadedFrom} → {result.dst}");
 
-            // Only scrub root AFTER a box destination exists — never delete the only copy.
+            // Only scrub source AFTER a box destination exists — never delete the only copy.
             if (destLanded || DestFileOk(docsDst) || DestFileOk(persDst))
             {
                 for (var attempt = 0; attempt < 6; attempt++)
                 {
-                    TryDeleteFile(Path.Combine(docs, objName));
-                    TryDeleteFile(Path.Combine(persistent, objName));
-                    // MediaStore root-only (not the box path).
-                    ThreeOSAndroidStorage.MediaStoreDeleteByRelativeName(
-                        "Documents/" + DemoFolderName + "/", objName);
-                    if (!FileLooksPresent(Path.Combine(docs, objName)) &&
-                        !FileLooksPresent(Path.Combine(persistent, objName)))
+                    TryDeleteFile(CombineRootRel(docs, sourceRel));
+                    TryDeleteFile(CombineRootRel(persistent, sourceRel));
+                    // MediaStore: nested relative under Documents/DemoFolder.
+                    var mediaDir = "Documents/" + DemoFolderName + "/";
+                    var slash = sourceRel.LastIndexOf('/');
+                    if (slash > 0)
+                    {
+                        mediaDir += sourceRel.Substring(0, slash + 1);
+                        ThreeOSAndroidStorage.MediaStoreDeleteByRelativeName(mediaDir,
+                            sourceRel.Substring(slash + 1));
+                    }
+                    else
+                    {
+                        ThreeOSAndroidStorage.MediaStoreDeleteByRelativeName(mediaDir, sourceRel);
+                    }
+
+                    if (!FileLooksPresent(CombineRootRel(docs, sourceRel)) &&
+                        !FileLooksPresent(CombineRootRel(persistent, sourceRel)))
                     {
                         break;
                     }
@@ -2004,7 +2330,7 @@ namespace ThreeOS
                     yield return null;
                 }
 
-                if (FileLooksPresent(Path.Combine(docs, objName)) &&
+                if (FileLooksPresent(CombineRootRel(docs, sourceRel)) &&
                     !ThreeOSAndroidStorage.IsExternalStorageManager())
                 {
                     _waitingForAllFilesAccess = true;
@@ -2020,10 +2346,10 @@ namespace ThreeOS
             done?.Invoke(result);
         }
 
-        private IEnumerator CommitInsertFolderToDisk(string folderName, string boxName, string docs,
+        private IEnumerator CommitInsertFolderToDisk(string sourceRel, string destRel, string docs,
             string persistent, string writeRoot, InsertFsResult result, System.Action<InsertFsResult> done)
         {
-            var docsSrc = Path.Combine(docs, folderName);
+            var docsSrc = CombineRootRel(docs, sourceRel);
             var needsDocumentsCut = DirectoryLooksPresent(docsSrc) ||
                                     string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase);
 
@@ -2047,18 +2373,18 @@ namespace ThreeOS
             var cutDocs = false;
             if (ThreeOSAndroidStorage.IsExternalStorageManager())
             {
-                cutDocs = TryCutRootFolder(docs, folderName, boxName);
+                cutDocs = TryCutRelFolder(docs, sourceRel, destRel);
             }
 
-            var cutPers = TryCutRootFolder(persistent, folderName, boxName);
+            var cutPers = TryCutRelFolder(persistent, sourceRel, destRel);
             if (!string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(writeRoot, persistent, System.StringComparison.OrdinalIgnoreCase))
             {
-                TryCutRootFolder(writeRoot, folderName, boxName);
+                TryCutRelFolder(writeRoot, sourceRel, destRel);
             }
 
-            var docsDst = Path.Combine(docs, boxName, folderName);
-            var persDst = Path.Combine(persistent, boxName, folderName);
+            var docsDst = CombineRootRel(docs, destRel);
+            var persDst = CombineRootRel(persistent, destRel);
             var destLanded = DirectoryLooksPresent(docsDst) || DirectoryLooksPresent(persDst) ||
                              DirectoryLooksPresent(result.dst);
 
@@ -2070,12 +2396,12 @@ namespace ThreeOS
             else if (DirectoryLooksPresent(persDst))
             {
                 result.dst = persDst;
-                result.src = Path.Combine(persistent, folderName);
+                result.src = CombineRootRel(persistent, sourceRel);
             }
 
             result.ok = cutDocs || cutPers || destLanded;
             Debug.Log(
-                $"[3OS] folder insert cut docs={cutDocs} pers={cutPers} destOk={destLanded} → {result.dst}");
+                $"[3OS] folder insert cut docs={cutDocs} pers={cutPers} destOk={destLanded} {sourceRel} → {result.dst}");
 
             if (!result.ok)
             {
@@ -2096,6 +2422,11 @@ namespace ThreeOS
             float e = 0f;
             while (e < halfDuration)
             {
+                if (t == null)
+                {
+                    yield break;
+                }
+
                 e += Time.deltaTime;
                 var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(e / halfDuration));
                 t.localScale = baseScale * Mathf.Lerp(1f, peak, u);
@@ -2105,13 +2436,21 @@ namespace ThreeOS
             e = 0f;
             while (e < halfDuration)
             {
+                if (t == null)
+                {
+                    yield break;
+                }
+
                 e += Time.deltaTime;
                 var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(e / halfDuration));
                 t.localScale = baseScale * Mathf.Lerp(peak, 1f, u);
                 yield return null;
             }
 
-            t.localScale = baseScale;
+            if (t != null)
+            {
+                t.localScale = baseScale;
+            }
         }
 
         /// <summary>True when a written insert destination is present with non-zero size.</summary>
@@ -2151,18 +2490,18 @@ namespace ThreeOS
         }
 
         /// <summary>
-        /// Move <c>{root}/{folder}</c> → <c>{root}/{box}/{folder}</c> (box-into-box).
+        /// Move <c>{root}/{sourceRel}</c> → <c>{root}/{destRel}</c> (box-into-box, nested OK).
         /// </summary>
-        private bool TryCutRootFolder(string root, string folderName, string boxName)
+        private bool TryCutRelFolder(string root, string sourceRel, string destRel)
         {
-            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(folderName) ||
-                string.IsNullOrEmpty(boxName))
+            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(sourceRel) ||
+                string.IsNullOrEmpty(destRel))
             {
                 return false;
             }
 
-            var src = Path.Combine(root, folderName);
-            var dst = Path.Combine(root, boxName, folderName);
+            var src = CombineRootRel(root, sourceRel);
+            var dst = CombineRootRel(root, destRel);
             if (!DirectoryLooksPresent(src))
             {
                 return DirectoryLooksPresent(dst);
@@ -2175,7 +2514,11 @@ namespace ThreeOS
 
             try
             {
-                Directory.CreateDirectory(Path.Combine(root, boxName));
+                var parent = Path.GetDirectoryName(dst);
+                if (!string.IsNullOrEmpty(parent))
+                {
+                    Directory.CreateDirectory(parent);
+                }
             }
             catch (System.Exception ex)
             {
@@ -2240,25 +2583,31 @@ namespace ThreeOS
         }
 
         /// <summary>
-        /// Move <c>{root}/{obj}</c> → <c>{root}/{box}/{obj}</c>.
+        /// Move <c>{root}/{sourceRel}</c> → <c>{root}/{destRel}</c>.
         /// Order is write/move destination first, delete source second. Never deletes the
         /// destination after a successful write (Exists can lie on Quest and caused data loss).
         /// </summary>
-        private bool TryCutRootFile(string root, string objName, string boxName, byte[] data)
+        private bool TryCutRelFile(string root, string sourceRel, string destRel, byte[] data)
         {
-            if (string.IsNullOrEmpty(root))
+            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(sourceRel) ||
+                string.IsNullOrEmpty(destRel))
             {
                 return false;
             }
 
-            var src = Path.Combine(root, objName);
-            var dst = Path.Combine(root, boxName, objName);
+            var src = CombineRootRel(root, sourceRel);
+            var dst = CombineRootRel(root, destRel);
+            var leaf = Path.GetFileName(sourceRel.Replace('\\', '/'));
             var isDocumentsRoot = string.Equals(root, PreferredDocumentsDemoPath(),
                 System.StringComparison.OrdinalIgnoreCase);
 
             try
             {
-                Directory.CreateDirectory(Path.Combine(root, boxName));
+                var parent = Path.GetDirectoryName(dst);
+                if (!string.IsNullOrEmpty(parent))
+                {
+                    Directory.CreateDirectory(parent);
+                }
             }
             catch (System.Exception ex)
             {
@@ -2331,13 +2680,19 @@ namespace ThreeOS
                 return FileLooksPresent(dst);
             }
 
-            // Destination confirmed — now remove root source (cut).
+            // Destination confirmed — now remove source (cut).
             TryDeleteFile(src);
             if (isDocumentsRoot)
             {
                 ThreeOSAndroidStorage.MediaStoreDelete(src);
-                ThreeOSAndroidStorage.MediaStoreDeleteByRelativeName(
-                    "Documents/" + DemoFolderName + "/", objName);
+                var mediaDir = "Documents/" + DemoFolderName + "/";
+                var slash = sourceRel.LastIndexOf('/');
+                if (slash > 0)
+                {
+                    mediaDir += sourceRel.Substring(0, slash + 1);
+                }
+
+                ThreeOSAndroidStorage.MediaStoreDeleteByRelativeName(mediaDir, leaf);
             }
 
             return true;
@@ -2466,6 +2821,557 @@ namespace ThreeOS
             }
 
             return frame.head;
+        }
+
+        private bool TryBeginCloseOnXHover()
+        {
+            if (_boxAnimBusy || _xHoverBoxId == 0 || !_expandedBoxes.ContainsKey(_xHoverBoxId))
+            {
+                return false;
+            }
+
+            StartCoroutine(CloseBoxSequence(_xHoverBoxId));
+            return true;
+        }
+
+        private void UpdateExpandedDismissAffordances()
+        {
+            _xHoverBoxId = 0;
+            if (_expandedBoxes.Count == 0 || _input == null)
+            {
+                return;
+            }
+
+            var aimUnity = InteropStructs.ToUnityPose(AimPose(_input.LastFrame));
+            var aimPos = aimUnity.position;
+            // Pure distance test (no physics/colliders). Hysteresis so 2× hover scale
+            // does not flicker in/out at the sphere edge.
+            var enterRadius = DismissXDiameterM * 0.5f;
+            var exitRadius = enterRadius * 2.25f;
+
+            foreach (var kv in _expandedBoxes)
+            {
+                var ui = kv.Value;
+                if (ui.XRoot == null || !_views.TryGetValue(ui.BoxId, out var boxView) ||
+                    boxView.Root == null)
+                {
+                    continue;
+                }
+
+                var up = boxView.Root.transform.up;
+                var xPos = boxView.Root.transform.position + up * BoxDismissXOffsetM;
+                ui.XRoot.transform.position = xPos;
+                var cam = Camera.main;
+                if (cam != null)
+                {
+                    ui.XRoot.transform.rotation =
+                        Quaternion.LookRotation((cam.transform.position - xPos).normalized, Vector3.up);
+                }
+
+                var dist = Vector3.Distance(aimPos, xPos);
+                if (ui.Hovered)
+                {
+                    ui.Hovered = dist <= exitRadius;
+                }
+                else
+                {
+                    ui.Hovered = dist <= enterRadius;
+                }
+
+                if (ui.XVisual != null)
+                {
+                    ui.XVisual.localScale = ui.Hovered ? Vector3.one * 2f : Vector3.one;
+                }
+
+                if (ui.Hovered)
+                {
+                    _xHoverBoxId = ui.BoxId;
+                }
+            }
+        }
+
+        private IEnumerator OpenBoxSequence(ulong boxId)
+        {
+            if (_boxAnimBusy || _expandedBoxes.ContainsKey(boxId))
+            {
+                yield break;
+            }
+
+            if (!TryFindItem(boxId, out var boxItem) || boxItem.kind != 1)
+            {
+                _status = "open failed: not a box";
+                yield break;
+            }
+
+            if (!_views.TryGetValue(boxId, out var boxView) || boxView.Root == null)
+            {
+                _status = "open failed: missing box view";
+                yield break;
+            }
+
+            _boxAnimBusy = true;
+            var boxName = boxItem.Name;
+            try
+            {
+                if (!EnsureBoxChildren(boxId, boxName, out var childIds))
+                {
+                    _status = $"open failed: {_bridge.LastError}";
+                    yield break;
+                }
+
+                if (!_bridge.ExpandBox(boxId))
+                {
+                    _status = $"expand failed: {_bridge.LastError}";
+                    yield break;
+                }
+
+                childIds = CollectChildIds(boxId);
+                var targets = new Dictionary<ulong, Pose>();
+                var centroid = Vector3.zero;
+                var n = 0;
+                foreach (var childId in childIds)
+                {
+                    _animLockedIds.Add(childId);
+                    if (!TryFindItem(childId, out var childItem) || (childItem.flags & 1u) == 0)
+                    {
+                        continue;
+                    }
+
+                    var unity = InteropStructs.ToUnityPose(childItem.pose);
+                    targets[childId] = unity;
+                    centroid += unity.position;
+                    n++;
+                }
+
+                var xPos = boxView.Root.transform.position +
+                           boxView.Root.transform.up * BoxDismissXOffsetM;
+                if (n > 0)
+                {
+                    centroid /= n;
+                }
+                else
+                {
+                    centroid = xPos;
+                }
+
+                // Seed at final layout poses, parent under a unit-scale pivot, then snap the
+                // pivot to X at a tiny scale and tween out. Never parent under scale=0 (NaN locals).
+                const float startScale = 0.001f;
+                foreach (var childId in childIds)
+                {
+                    if (!_views.TryGetValue(childId, out var childView) || childView.Root == null)
+                    {
+                        if (TryFindItem(childId, out var item))
+                        {
+                            _views[childId] = CreateView(item);
+                            childView = _views[childId];
+                        }
+                    }
+
+                    if (childView?.Root == null || !targets.TryGetValue(childId, out var targetPose))
+                    {
+                        continue;
+                    }
+
+                    childView.Root.SetActive(true);
+                    childView.Root.transform.SetParent(null, true);
+                    childView.Root.transform.localScale = Vector3.one;
+                    childView.Root.transform.SetPositionAndRotation(targetPose.position, targetPose.rotation);
+                }
+
+                var animNode = new GameObject($"3OS_ExpandAnim_{boxId}");
+                animNode.transform.SetPositionAndRotation(centroid, boxView.Root.transform.rotation);
+                animNode.transform.localScale = Vector3.one;
+                foreach (var childId in childIds)
+                {
+                    if (_views.TryGetValue(childId, out var childView) && childView.Root != null &&
+                        targets.ContainsKey(childId))
+                    {
+                        childView.Root.transform.SetParent(animNode.transform, true);
+                        childView.Root.transform.localScale = Vector3.one;
+                    }
+                }
+
+                animNode.transform.position = xPos;
+                animNode.transform.localScale = Vector3.one * startScale;
+
+                var duration = Mathf.Max(0.05f, BoxExpandAnimSeconds);
+                var elapsed = 0f;
+                while (elapsed < duration)
+                {
+                    elapsed += Time.unscaledDeltaTime;
+                    var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(elapsed / duration));
+                    animNode.transform.position = Vector3.Lerp(xPos, centroid, u);
+                    animNode.transform.localScale = Vector3.one * Mathf.Lerp(startScale, 1f, u);
+                    yield return null;
+                }
+
+                animNode.transform.position = centroid;
+                animNode.transform.localScale = Vector3.one;
+                foreach (var childId in childIds)
+                {
+                    if (!_views.TryGetValue(childId, out var childView) || childView.Root == null)
+                    {
+                        continue;
+                    }
+
+                    childView.Root.transform.SetParent(null, true);
+                    childView.Root.transform.localScale = Vector3.one;
+                    if (targets.TryGetValue(childId, out var targetPose))
+                    {
+                        childView.Root.transform.SetPositionAndRotation(targetPose.position,
+                            targetPose.rotation);
+                    }
+                }
+
+                Destroy(animNode);
+                foreach (var childId in childIds)
+                {
+                    _animLockedIds.Remove(childId);
+                }
+
+                _bridge.SetBoxOpen(boxId, true);
+                var ui = new ExpandedBoxUi { BoxId = boxId };
+                ui.ChildIds.AddRange(childIds);
+                ui.XRoot = CreateDismissX(xPos);
+                ui.XVisual = ui.XRoot.transform.Find("XVisual");
+                _expandedBoxes[boxId] = ui;
+                _status = $"opened {boxName} ({childIds.Count})";
+                Debug.Log($"[3OS] {_status}");
+            }
+            finally
+            {
+                _animLockedIds.Clear();
+                _boxAnimBusy = false;
+            }
+        }
+
+        private IEnumerator CloseBoxSequence(ulong boxId)
+        {
+            if (_boxAnimBusy || !_expandedBoxes.TryGetValue(boxId, out var ui))
+            {
+                yield break;
+            }
+
+            _boxAnimBusy = true;
+            _xHoverBoxId = 0;
+            try
+            {
+                var childIds = new List<ulong>(ui.ChildIds);
+                Vector3 centroid = Vector3.zero;
+                var n = 0;
+                foreach (var childId in childIds)
+                {
+                    if (_views.TryGetValue(childId, out var childView) && childView.Root != null &&
+                        childView.Root.activeInHierarchy)
+                    {
+                        centroid += childView.Root.transform.position;
+                        n++;
+                    }
+                }
+
+                Vector3 xPos;
+                if (_views.TryGetValue(boxId, out var boxView) && boxView.Root != null)
+                {
+                    xPos = boxView.Root.transform.position + boxView.Root.transform.up * BoxDismissXOffsetM;
+                }
+                else
+                {
+                    xPos = ui.XRoot != null ? ui.XRoot.transform.position : centroid;
+                }
+
+                if (n > 0)
+                {
+                    centroid /= n;
+                }
+                else
+                {
+                    centroid = xPos;
+                }
+
+                foreach (var childId in childIds)
+                {
+                    _animLockedIds.Add(childId);
+                }
+
+                const float endScale = 0.001f;
+                var animNode = new GameObject($"3OS_CollapseAnim_{boxId}");
+                animNode.transform.SetPositionAndRotation(centroid, Quaternion.identity);
+                animNode.transform.localScale = Vector3.one;
+                foreach (var childId in childIds)
+                {
+                    if (_views.TryGetValue(childId, out var childView) && childView.Root != null)
+                    {
+                        childView.Root.transform.SetParent(animNode.transform, true);
+                        childView.Root.transform.localScale = Vector3.one;
+                    }
+                }
+
+                var duration = Mathf.Max(0.05f, BoxExpandAnimSeconds);
+                var elapsed = 0f;
+                while (elapsed < duration)
+                {
+                    elapsed += Time.unscaledDeltaTime;
+                    var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(elapsed / duration));
+                    animNode.transform.position = Vector3.Lerp(centroid, xPos, u);
+                    animNode.transform.localScale = Vector3.one * Mathf.Lerp(1f, endScale, u);
+                    yield return null;
+                }
+
+                foreach (var childId in childIds)
+                {
+                    if (_views.TryGetValue(childId, out var childView) && childView.Root != null)
+                    {
+                        childView.Root.transform.SetParent(null, true);
+                        childView.Root.transform.localScale = Vector3.one;
+                        childView.Root.SetActive(false);
+                    }
+                }
+
+                Destroy(animNode);
+                if (ui.XRoot != null)
+                {
+                    Destroy(ui.XRoot);
+                }
+
+                _expandedBoxes.Remove(boxId);
+
+                if (!_bridge.CollapseBox(boxId))
+                {
+                    _status = $"collapse failed: {_bridge.LastError}";
+                }
+                else
+                {
+                    _bridge.SetBoxOpen(boxId, false);
+                    _status = "box closed";
+                }
+
+                foreach (var childId in childIds)
+                {
+                    _animLockedIds.Remove(childId);
+                }
+            }
+            finally
+            {
+                _animLockedIds.Clear();
+                _boxAnimBusy = false;
+            }
+        }
+
+        private bool EnsureBoxChildren(ulong boxId, string boxName, out List<ulong> childIds)
+        {
+            CollectBoxFolderEntries(boxName, out var files, out var dirs);
+
+            // Reuse existing workspace children under this box (inserts + prior expands).
+            var existingByName = new Dictionary<string, ulong>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var id in CollectChildIds(boxId))
+            {
+                if (TryFindItem(id, out var item))
+                {
+                    existingByName[item.Name] = id;
+                }
+            }
+
+            foreach (var name in files)
+            {
+                if (existingByName.ContainsKey(name))
+                {
+                    continue;
+                }
+
+                var rel = $"{boxName}/{name}";
+                if (!_bridge.StorageAddObject(name, rel, out var id) ||
+                    !_bridge.StorageSetParentBox(id, boxId) ||
+                    !_bridge.StorageSetInField(id, false))
+                {
+                    childIds = CollectChildIds(boxId);
+                    return false;
+                }
+            }
+
+            foreach (var name in dirs)
+            {
+                if (existingByName.ContainsKey(name))
+                {
+                    continue;
+                }
+
+                var rel = $"{boxName}/{name}";
+                uint nestedCount = 0;
+                foreach (var root in CandidateDemoRoots())
+                {
+                    if (string.IsNullOrEmpty(root))
+                    {
+                        continue;
+                    }
+
+                    var nestedPath = Path.Combine(root, boxName, name);
+                    var c = ThreeOSAndroidStorage.CountFilesInDirectory(nestedPath);
+                    if (c > nestedCount)
+                    {
+                        nestedCount = c;
+                    }
+                }
+
+                if (!_bridge.StorageAddBox(name, rel, nestedCount, out var id) ||
+                    !_bridge.StorageSetParentBox(id, boxId) ||
+                    !_bridge.StorageSetInField(id, false))
+                {
+                    childIds = CollectChildIds(boxId);
+                    return false;
+                }
+            }
+
+            childIds = CollectChildIds(boxId);
+            return true;
+        }
+
+        private List<ulong> CollectChildIds(ulong boxId)
+        {
+            var childIds = new List<ulong>();
+            var count = _bridge.StorageItemCount();
+            for (uint i = 0; i < count; i++)
+            {
+                if (!_bridge.TryGetWorkspaceItem(i, out var item))
+                {
+                    continue;
+                }
+
+                if (_bridge.TryGetParentBox(item.entityId, out var parent) && parent == boxId)
+                {
+                    childIds.Add(item.entityId);
+                }
+            }
+
+            return childIds;
+        }
+
+        private void CollectBoxFolderEntries(string boxName, out List<string> files, out List<string> dirs)
+        {
+            var fileSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            var dirSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var root in CandidateDemoRoots())
+            {
+                if (string.IsNullOrEmpty(root))
+                {
+                    continue;
+                }
+
+                var folder = Path.Combine(root, boxName);
+                if (!Directory.Exists(folder) && !ThreeOSAndroidStorage.Exists(folder))
+                {
+                    continue;
+                }
+
+                foreach (var name in ThreeOSAndroidStorage.ListFileNames(folder))
+                {
+                    fileSet.Add(name);
+                }
+
+                foreach (var name in ThreeOSAndroidStorage.ListDirectoryNames(folder))
+                {
+                    dirSet.Add(name);
+                }
+            }
+
+            files = new List<string>(fileSet);
+            dirs = new List<string>(dirSet);
+            files.Sort(System.StringComparer.OrdinalIgnoreCase);
+            dirs.Sort(System.StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static GameObject CreateDismissX(Vector3 worldPos)
+        {
+            var root = new GameObject("3OS_BoxDismissX");
+            root.transform.position = worldPos;
+
+            var visual = new GameObject("XVisual");
+            visual.transform.SetParent(root.transform, false);
+
+            var sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            sphere.name = "Sphere";
+            sphere.transform.SetParent(visual.transform, false);
+            sphere.transform.localScale = Vector3.one * DismissXDiameterM;
+            var sphereCol = sphere.GetComponent<Collider>();
+            if (sphereCol != null)
+            {
+                Destroy(sphereCol);
+            }
+
+            var sphereMr = sphere.GetComponent<MeshRenderer>();
+            sphereMr.sharedMaterial = CreateTranslucentUnlitMaterial(new Color(0.65f, 0.65f, 0.7f, 0.35f));
+            // Draw shell first so opaque X bars remain readable through it.
+            sphereMr.sortingOrder = -1;
+
+            CreateXBar(visual.transform, 45f);
+            CreateXBar(visual.transform, -45f);
+            return root;
+        }
+
+        private static void CreateXBar(Transform parent, float zAngle)
+        {
+            var bar = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            bar.name = "XBar";
+            bar.transform.SetParent(parent, false);
+            // Scaled with DismissXDiameterM (baseline was 0.02 m → 0.016 / 0.0022 bars).
+            var s = DismissXDiameterM / 0.02f;
+            bar.transform.localScale = new Vector3(0.016f * s, 0.0022f * s, 0.0022f * s);
+            bar.transform.localRotation = Quaternion.Euler(0f, 0f, zAngle);
+            var col = bar.GetComponent<Collider>();
+            if (col != null)
+            {
+                Object.Destroy(col);
+            }
+
+            var mat = new Material(Shader.Find("Unlit/Color") ?? Shader.Find("Sprites/Default") ??
+                                   Shader.Find("Universal Render Pipeline/Unlit"));
+            if (mat != null)
+            {
+                var c = new Color(0.12f, 0.12f, 0.14f, 1f);
+                if (mat.HasProperty("_Color"))
+                {
+                    mat.SetColor("_Color", c);
+                }
+
+                if (mat.HasProperty("_BaseColor"))
+                {
+                    mat.SetColor("_BaseColor", c);
+                }
+
+                bar.GetComponent<MeshRenderer>().sharedMaterial = mat;
+            }
+        }
+
+        private static Material CreateTranslucentUnlitMaterial(Color color)
+        {
+            var shader = Shader.Find("Sprites/Default")
+                         ?? Shader.Find("Unlit/Transparent")
+                         ?? Shader.Find("Legacy Shaders/Transparent/Diffuse")
+                         ?? Shader.Find("Universal Render Pipeline/Unlit")
+                         ?? Shader.Find("Unlit/Color");
+            var mat = new Material(shader);
+            if (mat.HasProperty("_Color"))
+            {
+                mat.SetColor("_Color", color);
+            }
+
+            if (mat.HasProperty("_BaseColor"))
+            {
+                mat.SetColor("_BaseColor", color);
+            }
+
+            mat.color = color;
+            if (mat.HasProperty("_Surface"))
+            {
+                mat.SetFloat("_Surface", 1f);
+            }
+
+            mat.SetOverrideTag("RenderType", "Transparent");
+            mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+            mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+            mat.SetInt("_ZWrite", 0);
+            mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+            return mat;
         }
     }
 }

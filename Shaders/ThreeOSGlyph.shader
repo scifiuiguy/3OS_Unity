@@ -1,7 +1,8 @@
 // Canonical OS glyph shader: translucent base + selection edge glow (same pass).
 // Prism glyphs use object-space face-edge falloff (N·V Fresnel is useless on flat faces —
 // the whole face shares one normal, so glow floods the surface at small scale).
-// Hosts toggle with MaterialPropertyBlock _Selected (0 = off, 1 = on).
+// Hosts toggle rim with MPB/material _Selected (0 = off, 1 = on). Name is historical:
+// it gates the edge glow for ABI select OR blue X-hover — not "selected" in the kernel sense.
 Shader "ThreeOS/Glyph"
 {
     Properties
@@ -28,6 +29,9 @@ Shader "ThreeOS/Glyph"
             "RenderType" = "Transparent"
             "IgnoreProjector" = "True"
             "RenderPipeline" = "UniversalPipeline"
+            // MPB _Selected must stay per-renderer; batching/culling was hard-toggling
+            // multi-glyph blue hover while single white select stayed stable.
+            "DisableBatching" = "True"
         }
 
         Pass
@@ -42,7 +46,6 @@ Shader "ThreeOS/Glyph"
             CGPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            #pragma multi_compile_instancing
             #include "UnityCG.cginc"
 
             float4 _BaseColor;
@@ -58,7 +61,6 @@ Shader "ThreeOS/Glyph"
             {
                 float4 vertex : POSITION;
                 float3 normal : NORMAL;
-                UNITY_VERTEX_INPUT_INSTANCE_ID
             };
 
             struct v2f
@@ -108,7 +110,6 @@ Shader "ThreeOS/Glyph"
             v2f vert(appdata v)
             {
                 v2f o;
-                UNITY_SETUP_INSTANCE_ID(v);
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
                 o.pos = UnityObjectToClipPos(v.vertex);
                 o.positionOS = v.vertex.xyz;
@@ -135,7 +136,13 @@ Shader "ThreeOS/Glyph"
 
     SubShader
     {
-        Tags { "Queue" = "Transparent" "RenderType" = "Transparent" "IgnoreProjector" = "True" }
+        Tags
+        {
+            "Queue" = "Transparent"
+            "RenderType" = "Transparent"
+            "IgnoreProjector" = "True"
+            "DisableBatching" = "True"
+        }
 
         Pass
         {

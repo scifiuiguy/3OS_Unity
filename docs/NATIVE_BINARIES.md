@@ -36,6 +36,15 @@ Copy-Item build-android-arm64\lib3os_kernel.so `
   ..\3OS_Unity\Plugins\Android\lib3os_kernel.so -Force
 ```
 
+**Sample project override:** `3OS_Unity_Sample_Project/Assets/Plugins/Android/lib3os_kernel.so` shadows the UPM package plugin in Quest APKs. After rebuilding the Android SO, copy it there too (or remove the Assets copy so the package binary wins):
+
+```powershell
+Copy-Item ..\3OS_Unity\Plugins\Android\lib3os_kernel.so `
+  ..\3OS_Unity_Sample_Project\Assets\Plugins\Android\lib3os_kernel.so -Force
+```
+
+A stale Assets SO shows up on device as `open failed: Unable to find an entry point named 'threeos_storage_…'`.
+
 Committed `PluginImporter` `.meta` files mark `lib3os_kernel.so` and `libc++_shared.so` as **Android / ARM64** only (required for packaging into the Quest APK). Do not replace those metas with stub GUID-only files.
 
 CI for core (`.github/workflows/build-binaries.yml`) will eventually publish both artifacts for this package to consume.

@@ -158,6 +158,21 @@ namespace ThreeOS
         private static extern int threeos_storage_set_box_open(ulong boxId, int open);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_set_parent_box(ulong entityId, ulong parentBoxId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_set_in_field(ulong entityId, int inField);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_get_parent_box(ulong entityId, out ulong outParentBoxId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_expand_box(ulong boxId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_collapse_box(ulong boxId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_glyph_install_pack(byte[] bytes, uint byteCount);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
@@ -627,6 +642,39 @@ namespace ThreeOS
 
         public bool SetBoxOpen(ulong boxId, bool open) =>
             Call(() => threeos_storage_set_box_open(boxId, open ? 1 : 0));
+
+        public bool StorageSetParentBox(ulong entityId, ulong parentBoxId) =>
+            Call(() => threeos_storage_set_parent_box(entityId, parentBoxId));
+
+        public bool StorageSetInField(ulong entityId, bool inField) =>
+            Call(() => threeos_storage_set_in_field(entityId, inField ? 1 : 0));
+
+        public bool TryGetParentBox(ulong entityId, out ulong parentBoxId)
+        {
+            parentBoxId = 0;
+            if (!IsLoaded) return false;
+            try
+            {
+                if (threeos_storage_get_parent_box(entityId, out parentBoxId) != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        public bool ExpandBox(ulong boxId) =>
+            Call(() => threeos_storage_expand_box(boxId));
+
+        public bool CollapseBox(ulong boxId) =>
+            Call(() => threeos_storage_collapse_box(boxId));
 
         public bool InstallGlyphPack(byte[] bytes)
         {

@@ -152,8 +152,13 @@ Documented path: **`/storage/emulated/0/Documents/3OS_Demo`** (Editor: `Document
   - [x] While selected, grip telekinesis works beyond near-field possess distance.
 - [x] **Task U4.7: Association / demo smoke**
   - [x] Debug HUD: storage status, snap/insert messages, `Sel:<name|none>`; content `.glb` resolves to glTF pack id (not Box packs).
+- [x] **Task U4.8: Box expand / collapse (drill-down)**
+  - [x] Double short-trigger on a Box opens contents (global mode); X dismiss closes (not a second double-tap).
+  - [x] Host lists box folder, ensures workspace children (`parent_box` / `in_field`), kernel `expand_box` / `collapse_box` matrix above parent (cell-hash collision).
+  - [x] Ephemeral cluster open/close anim; grey X sphere; X-hover light-blue child Fresnel via MPB.
+  - [x] No transform parenting between open parent and children after the tween.
 
-**Quest gate:** Staged `3OS_Demo` shows glyphs + Boxes in cubic matrix; drag-snap insert with open/bump/close; file **cut** into folder on disk (APK 24+; grant all-files on first Documents drop); index-trigger select shows highlight; empty trigger clears; selected object stays far-draggable until deselect (APK 25+). *(Rename via keyboard is **not** required for 0.4 — see 1.0.)*
+**Quest gate:** Staged `3OS_Demo` shows glyphs + Boxes in cubic matrix; drag-snap insert with open/bump/close; file **cut** into folder on disk (APK 24+; grant all-files on first Documents drop); index-trigger select shows highlight; empty trigger clears; selected object stays far-draggable until deselect (APK 25+); double-tap Box expand + X close (APK 35+). *(Rename via keyboard is **not** required for 0.4 — see 1.0.)*
 
 ---
 
@@ -222,6 +227,7 @@ Use this section for design notes, UX instincts, and “we’ll need this later�
 
 - *(Selection-gated telekinesis promoted into Phase 0.4 Task U4.6.)*
 - [ ] **Glyph pack GUI (artist tool):** Simple GUI (Editor window and/or small desktop app) to generate `.3glyph` packs without CLI — pick GLB, fill association/tint fields, run inject. Mirrors core Post-1.0 tooling note; optional path for the deferred U4.2 Editor helper.
+- [ ] **Global field spacing + glyph scale:** When core exposes `get/set_field_spacing`, drive it from Unity inspector/settings together with `GlyphSizeM` (keep ~2.2× ratio or one master cell size) and optionally re-layout / rescale the visible field.
 
 ---
 
