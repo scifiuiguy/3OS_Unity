@@ -177,7 +177,8 @@ namespace ThreeOS
 
             var rayStart = InteropStructs.OpenXrToUnityPosition(dbg.rayOrigin.ToVector3());
             var rayEnd = InteropStructs.OpenXrToUnityPosition(dbg.rayTip.ToVector3());
-            if (dbg.inDeadzone != 0)
+            // Sphere only after deadzone has armed (leave then re-enter).
+            if (dbg.deadzoneArmed != 0 && dbg.inDeadzone != 0)
             {
                 var sphereColor = new Color(0.4f, 0.75f, 1f, 0.25f);
                 var ghostColor = new Color(0.55f, 0.85f, 1f, 0.75f);

@@ -22,6 +22,10 @@ namespace ThreeOS
         public const int HandSampleBytes = 128;
         public const int PointCursorBytes = 32;
         public const int InteractionIntentsBytes = 16;
+        public const int VoodooFieldParamsBytes = 32;
+        public const int VoodooBoundingBoxBytes = 80;
+        public const int VoodooSessionBytes = 176;
+        public const int VoodooDragArrowBytes = 64;
 
         public static void AssertLayout()
         {
@@ -37,6 +41,10 @@ namespace ThreeOS
             var handSize = Marshal.SizeOf<InteropHandSample>();
             var cursorSize = Marshal.SizeOf<InteropPointCursor>();
             var intentsSize = Marshal.SizeOf<InteropInteractionIntents>();
+            var voodooParamsSize = Marshal.SizeOf<InteropVoodooFieldParams>();
+            var voodooBbSize = Marshal.SizeOf<InteropVoodooBoundingBox>();
+            var voodooSessionSize = Marshal.SizeOf<InteropVoodooSession>();
+            var voodooArrowSize = Marshal.SizeOf<InteropVoodooDragArrow>();
             Debug.Assert(inputSize == InputFrameBytes, $"InteropInputFrame size {inputSize} != {InputFrameBytes}");
             Debug.Assert(deltaSize == TransformDeltaBytes, $"InteropTransformDelta size {deltaSize} != {TransformDeltaBytes}");
             Debug.Assert(domeSize == DomeStateBytes, $"InteropDomeState size {domeSize} != {DomeStateBytes}");
@@ -49,6 +57,10 @@ namespace ThreeOS
             Debug.Assert(handSize == HandSampleBytes, $"InteropHandSample size {handSize} != {HandSampleBytes}");
             Debug.Assert(cursorSize == PointCursorBytes, $"InteropPointCursor size {cursorSize} != {PointCursorBytes}");
             Debug.Assert(intentsSize == InteractionIntentsBytes, $"InteropInteractionIntents size {intentsSize} != {InteractionIntentsBytes}");
+            Debug.Assert(voodooParamsSize == VoodooFieldParamsBytes, $"InteropVoodooFieldParams size {voodooParamsSize} != {VoodooFieldParamsBytes}");
+            Debug.Assert(voodooBbSize == VoodooBoundingBoxBytes, $"InteropVoodooBoundingBox size {voodooBbSize} != {VoodooBoundingBoxBytes}");
+            Debug.Assert(voodooSessionSize == VoodooSessionBytes, $"InteropVoodooSession size {voodooSessionSize} != {VoodooSessionBytes}");
+            Debug.Assert(voodooArrowSize == VoodooDragArrowBytes, $"InteropVoodooDragArrow size {voodooArrowSize} != {VoodooDragArrowBytes}");
         }
 
         /// <summary>Unity left-handed Y-up → OpenXR right-handed Y-up.</summary>
@@ -183,10 +195,77 @@ namespace ThreeOS
         None = 0,
         SelectPulse = 1 << 0,
         DragActive = 1 << 1,
-        VoodooHold = 1 << 2,
+        VoodooSnap = 1 << 2,
         PrimaryHeld = 1 << 3,
         SecondaryHeld = 1 << 4,
         TernaryHeld = 1 << 5,
+        VoodooFree = 1 << 6,
+    }
+
+    public enum VoodooMode : uint
+    {
+        None = 0,
+        Snap = 1,
+        FreeRange = 2,
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct ThreeOSIVec3
+    {
+        public int x;
+        public int y;
+        public int z;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropVoodooFieldParams
+    {
+        public float voxelSizeM;
+        public ThreeOSIVec3 nearBbVoxels;
+        public float fieldRadiusM;
+        public float fieldHeightM;
+        public float armReachM;
+        public uint reserved0;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropVoodooBoundingBox
+    {
+        public uint open;
+        public uint reserved0;
+        public ThreeOSPose pose;
+        public ThreeOSVec3 extents;
+        public ThreeOSIVec3 aspectVoxels;
+        public uint reserved1;
+        public ulong linkedCentroidId;
+        public uint reserved2;
+        public uint reserved3;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropVoodooSession
+    {
+        public uint mode;
+        public uint open;
+        public uint hand;
+        public uint reserved0;
+        public InteropVoodooBoundingBox farBb;
+        public InteropVoodooBoundingBox nearBb;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropVoodooDragArrow
+    {
+        public uint active;
+        public uint inDeadzone;
+        public float magnitude;
+        public float unused0;
+        public ThreeOSVec3 stick;
+        public ThreeOSVec3 rayOrigin;
+        public ThreeOSVec3 rayTip;
+        public uint deadzoneArmed;
+        public uint reserved1;
+        public uint reserved2;
     }
 
     /// <summary>128-byte Phase 0.5 hand sample (OpenXR meters).</summary>
@@ -332,7 +411,7 @@ namespace ThreeOS
         public ThreeOSVec3 stick;
         public ThreeOSVec3 rayOrigin;
         public ThreeOSVec3 rayTip;
-        public uint reserved0;
+        public uint deadzoneArmed;
         public uint reserved1;
         public uint reserved2;
     }

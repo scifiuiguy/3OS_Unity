@@ -12,6 +12,7 @@ namespace ThreeOS
         private ThreeOSTopologyController _topology;
         private ThreeOSKinematicsController _kinematics;
         private ThreeOSStorageController _storage;
+        private ThreeOSVoodooController _voodoo;
         private TextMesh _label;
         private Transform _follow;
 
@@ -25,6 +26,8 @@ namespace ThreeOS
                           FindFirstObjectByType<ThreeOSKinematicsController>();
             _storage = GetComponent<ThreeOSStorageController>() ??
                        FindFirstObjectByType<ThreeOSStorageController>();
+            _voodoo = GetComponent<ThreeOSVoodooController>() ??
+                      FindFirstObjectByType<ThreeOSVoodooController>();
             CreateWorldHud();
         }
 
@@ -87,7 +90,7 @@ namespace ThreeOS
             var ticksOk = _inputRouter != null && _inputRouter.LastTickOk;
             var flags = _inputRouter != null ? _inputRouter.LastFrame.trackingFlags : 0u;
             var topo = _topology != null
-                ? $"Dome:{_topology.DomeActive} Lattice:{_topology.LatticeActive} Portals:{_topology.PortalCount}"
+                ? $"Dome:{_topology.DomeActive} Lattice:{_topology.LatticeActive} {_topology.Status}"
                 : "Topology: n/a";
             var kin = _kinematics != null
                 ? $"Kinetic:{_kinematics.Phase} {_kinematics.Status}"
@@ -96,13 +99,36 @@ namespace ThreeOS
                 ? $"Storage:{(_storage.DemoActive ? "demo" : "off")} {_storage.Status}"
                 : "Storage: n/a";
             var sel = _storage != null ? $"Sel:{_storage.SelectionLabel}" : "Sel:n/a";
+            var palmL = _inputRouter != null ? PalmName(_inputRouter.LastLeftCursor.palmMode) : "?";
+            var palmR = _inputRouter != null ? PalmName(_inputRouter.LastRightCursor.palmMode) : "?";
+            var intents = _inputRouter != null ? _inputRouter.LastIntents : default;
+            var intentBits = IntentSummary(intents.flags);
+            var voodooLine = "Voodoo: n/a";
+            if (_bridge.NativeAbiVersion >= 6)
+            {
+                string HandBit(uint h)
+                {
+                    if (!_bridge.TryGetVoodooSession(h, out var vs) || vs.open == 0)
+                    {
+                        return "off";
+                    }
+
+                    return $"{(VoodooMode)vs.mode} f:{vs.farBb.open} n:{vs.nearBb.open}";
+                }
+
+                voodooLine = $"Voodoo L:{HandBit(0)} R:{HandBit(1)}";
+            }
+
             var text =
-                "3OS Phase 0.4\n" +
+                "3OS Phase 0.6\n" +
                 $"Plugin loaded: {_bridge.IsLoaded}\n" +
                 $"Native version: {ThreeOSBridge.FormatVersion(_bridge.NativeVersion)}\n" +
                 $"ABI version: {_bridge.NativeAbiVersion}\n" +
                 $"Ticks: {_bridge.TickCount} ok:{ticksOk}\n" +
                 $"Track: 0x{flags:X}\n" +
+                $"Palm L:{palmL} R:{palmR}\n" +
+                $"Intent:{intentBits}\n" +
+                $"{voodooLine}\n" +
                 $"{topo}\n" +
                 $"{storage}\n" +
                 $"{sel}\n" +
@@ -119,6 +145,31 @@ namespace ThreeOS
             }
 
             return text;
+        }
+
+        private static string PalmName(uint mode) => mode switch
+        {
+            (uint)PalmMode.Up => "Up",
+            (uint)PalmMode.Sideways => "Side",
+            (uint)PalmMode.Down => "Down",
+            _ => mode.ToString()
+        };
+
+        private static string IntentSummary(uint flags)
+        {
+            if (flags == 0)
+            {
+                return "-";
+            }
+
+            var parts = new System.Collections.Generic.List<string>(4);
+            if ((flags & (uint)InteractionIntentFlags.SelectPulse) != 0) parts.Add("Sel");
+            if ((flags & (uint)InteractionIntentFlags.DragActive) != 0) parts.Add("Drag");
+            if ((flags & (uint)InteractionIntentFlags.VoodooSnap) != 0) parts.Add("Snap");
+            if ((flags & (uint)InteractionIntentFlags.VoodooFree) != 0) parts.Add("Free");
+            if ((flags & (uint)InteractionIntentFlags.PrimaryHeld) != 0) parts.Add("P1");
+            if ((flags & (uint)InteractionIntentFlags.SecondaryHeld) != 0) parts.Add("P2");
+            return parts.Count > 0 ? string.Join("+", parts) : $"0x{flags:X}";
         }
     }
 }

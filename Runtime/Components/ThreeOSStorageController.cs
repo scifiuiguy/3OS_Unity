@@ -136,6 +136,10 @@ namespace ThreeOS
             }
 
             _insertArrow = ThreeOSArrowVisual.Create("3OS_InsertArrow", 0.01f);
+            if (GetComponent<ThreeOSVoodooController>() == null)
+            {
+                gameObject.AddComponent<ThreeOSVoodooController>();
+            }
         }
 
         private Color ResolvedGlowColor =>
@@ -1573,7 +1577,7 @@ namespace ThreeOS
                         _triggerDragActive = true;
                         TryPossessNearest(aimUnity.position);
                     }
-                    // Palm down → voodoo (Topology). Palm up → wait (Quest OS).
+                    // Palm down → snap voodoo (kernel session). Palm up → wait (Quest OS).
                 }
             }
 

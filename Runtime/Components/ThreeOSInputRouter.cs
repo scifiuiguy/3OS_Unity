@@ -351,8 +351,9 @@ namespace ThreeOS
 
             if (hand.GetJoint(XRHandJointID.Palm).TryGetPose(out var palmPose))
             {
-                // Palm forward ≈ -Y of joint in XR Hands; use up→OpenXR normal approx.
-                var n = palmPose.up;
+                // Meta XR Hands palm joint +Y points out the *back* of the hand (dorsal).
+                // Negate so kernel gets the palmar normal: palm to floor → world −Y → Down.
+                var n = -palmPose.up;
                 sample.palmNormal = InteropStructs.UnityToOpenXrPosition(n);
                 sample.palmModeValid = 0;
             }

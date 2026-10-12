@@ -55,33 +55,16 @@ namespace ThreeOS
             var select = (frame.buttonFlags & (uint)(ButtonFlags.RightSelect | ButtonFlags.LeftSelect)) != 0;
             var grab = (frame.buttonFlags & (uint)(ButtonFlags.RightGrab | ButtonFlags.LeftGrab)) != 0;
             var intents = _input.LastIntents;
-            var voodoo = (intents.flags & (uint)InteractionIntentFlags.VoodooHold) != 0;
-
-            // Palm-down primary hold → voodoo volume (dome). Menu still toggles as fallback.
-            if (voodoo)
+            // 0.6: snap/free voodoo drives far BB + yellow arrow (ThreeOSVoodooController),
+            // not the Phase 0.2 Half-Dome mesh (imaginary / unrendered product path).
+            var voodoo = (intents.flags & (uint)(InteractionIntentFlags.VoodooSnap |
+                                                 InteractionIntentFlags.VoodooFree)) != 0;
+            if (voodoo && !_voodooWasHeld)
             {
-                if (!_voodooWasHeld)
-                {
-                    _activeHand = (int)intents.handedness;
-                }
-
-                if (!DomeActive)
-                {
-                    if (_bridge.OpenDome(frame.head))
-                    {
-                        DomeActive = true;
-                        _status = "voodoo dome (palm-down hold)";
-                    }
-                }
-                else
-                {
-                    // Keep dome posed from head while held (Phase 0.5 stub).
-                    _bridge.OpenDome(frame.head);
-                }
-            }
-            else if (_voodooWasHeld && DomeActive)
-            {
-                _status = "voodoo released — Select opens lattice";
+                _activeHand = (int)intents.handedness;
+                _status = (intents.flags & (uint)InteractionIntentFlags.VoodooSnap) != 0
+                    ? "voodoo snap (far BB)"
+                    : "voodoo free-range (far BB)";
             }
 
             if (menu && !_menuWasDown)

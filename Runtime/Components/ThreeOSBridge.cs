@@ -213,6 +213,30 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_interaction_set_pinch_thresh_m(float meters);
 
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_voodoo_field_params();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_voodoo_bounding_box();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_voodoo_session();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_voodoo_drag_arrow();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_get_field_params(out InteropVoodooFieldParams outParams);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_set_field_params(ref InteropVoodooFieldParams parameters);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_get_session(uint hand, out InteropVoodooSession outSession);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_get_drag_arrow(uint hand, out InteropVoodooDragArrow outArrow);
+
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
         public uint NativeVersion { get; private set; }
@@ -280,6 +304,20 @@ namespace ThreeOS
                         threeos_sizeof_interaction_intents() != InteropStructs.InteractionIntentsBytes)
                     {
                         LastError = "Hand-interaction ABI size mismatch";
+                        IsLoaded = false;
+                        Debug.LogError($"[3OS] {LastError}");
+                        return;
+                    }
+                }
+
+                if (NativeAbiVersion >= 6)
+                {
+                    if (threeos_sizeof_voodoo_field_params() != InteropStructs.VoodooFieldParamsBytes ||
+                        threeos_sizeof_voodoo_bounding_box() != InteropStructs.VoodooBoundingBoxBytes ||
+                        threeos_sizeof_voodoo_session() != InteropStructs.VoodooSessionBytes ||
+                        threeos_sizeof_voodoo_drag_arrow() != InteropStructs.VoodooDragArrowBytes)
+                    {
+                        LastError = "Voodoo ABI size mismatch";
                         IsLoaded = false;
                         Debug.LogError($"[3OS] {LastError}");
                         return;
@@ -394,6 +432,51 @@ namespace ThreeOS
             catch (Exception ex) { LastError = ex.Message; return false; }
         }
 
+        public bool TryGetVoodooSession(uint hand, out InteropVoodooSession session)
+        {
+            session = default;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_voodoo_get_session(hand, out session);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool TryGetVoodooDragArrow(uint hand, out InteropVoodooDragArrow arrow)
+        {
+            arrow = default;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_voodoo_get_drag_arrow(hand, out arrow);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool TryGetVoodooFieldParams(out InteropVoodooFieldParams parameters)
+        {
+            parameters = default;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_voodoo_get_field_params(out parameters);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool SetVoodooFieldParams(InteropVoodooFieldParams parameters) =>
+            IsLoaded && NativeAbiVersion >= 6 &&
+            Call(() => threeos_voodoo_set_field_params(ref parameters));
 
         public bool SetScale(float worldToProxyRatio) =>
             Call(() => threeos_topology_set_scale(worldToProxyRatio));
