@@ -1,9 +1,10 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace ThreeOS
 {
     /// <summary>
-    /// Phase 0.6: dual-hand wireframe far/near voodoo BBs + yellow drag arrows.
+    /// Phase 0.6: dual-hand wireframe far/near voodoo BBs, yellow drag arrows, snap-mode dots.
     /// </summary>
     [DefaultExecutionOrder(210)]
     public sealed class ThreeOSVoodooController : MonoBehaviour
@@ -11,9 +12,13 @@ namespace ThreeOS
         private const float DeadzoneM = 0.015f;
         private static readonly Color FarWire = new Color(1f, 0.85f, 0.2f, 0.95f);
         private static readonly Color NearWire = new Color(0.4f, 0.85f, 1f, 0.95f);
+        private static readonly Color SnapIdle = new Color(1f, 0.92f, 0.35f, 0.75f);
+        private static readonly Color SnapLocked = new Color(1f, 0.55f, 0.1f, 0.95f);
 
         private ThreeOSBridge _bridge;
         private readonly HandViz[] _hands = new HandViz[2];
+        private Material _matSnapIdle;
+        private Material _matSnapLocked;
 
         private sealed class HandViz
         {
@@ -22,12 +27,15 @@ namespace ThreeOS
             public Transform NearRoot;
             public LineRenderer FarLines;
             public LineRenderer NearLines;
+            public readonly List<Transform> SnapDots = new List<Transform>();
             public bool LoggedOpen;
         }
 
         private void Awake()
         {
             _bridge = GetComponent<ThreeOSBridge>() ?? FindFirstObjectByType<ThreeOSBridge>();
+            _matSnapIdle = CreateLineMaterial(SnapIdle);
+            _matSnapLocked = CreateLineMaterial(SnapLocked);
             for (var h = 0; h < 2; h++)
             {
                 _hands[h] = new HandViz
@@ -41,6 +49,12 @@ namespace ThreeOS
             }
         }
 
+        private void OnDestroy()
+        {
+            if (_matSnapIdle != null) Destroy(_matSnapIdle);
+            if (_matSnapLocked != null) Destroy(_matSnapLocked);
+        }
+
         private void LateUpdate()
         {
             if (_bridge == null || !_bridge.IsLoaded || _bridge.NativeAbiVersion < 6)
@@ -49,15 +63,9 @@ namespace ThreeOS
                 return;
             }
 
-            var anyOpen = false;
             for (uint h = 0; h < 2; h++)
             {
-                anyOpen |= UpdateHand(h);
-            }
-
-            if (!anyOpen)
-            {
-                // keep quiet
+                UpdateHand(h);
             }
         }
 
@@ -88,7 +96,71 @@ namespace ThreeOS
             UpdateWireBox(viz.FarRoot, viz.FarLines, session.farBb);
             UpdateWireBox(viz.NearRoot, viz.NearLines, session.nearBb);
             UpdateYellowArrow(hand, viz);
+            UpdateSnapDots(hand, viz, session.mode == (uint)VoodooMode.Snap);
             return true;
+        }
+
+        private void UpdateSnapDots(uint hand, HandViz viz, bool snapMode)
+        {
+            if (!snapMode)
+            {
+                HideSnapDots(viz);
+                return;
+            }
+
+            var n = (int)_bridge.VoodooSnapNodeCount(hand);
+            EnsureSnapDotCount(viz, hand, n);
+            for (var i = 0; i < n; i++)
+            {
+                if (!_bridge.TryGetVoodooSnapNode(hand, (uint)i, out var node))
+                {
+                    viz.SnapDots[i].gameObject.SetActive(false);
+                    continue;
+                }
+
+                var t = viz.SnapDots[i];
+                t.position = InteropStructs.OpenXrToUnityPosition(node.worldPosition.ToVector3());
+                // Visual only — kernel snap radius (gravity) stays unchanged.
+                var r = Mathf.Max(0.01f, node.radiusM);
+                var scale = (node.snapped != 0 ? r * 2.4f : r * 2f) / 3f;
+                t.localScale = Vector3.one * scale;
+                var mr = t.GetComponent<MeshRenderer>();
+                if (mr != null)
+                {
+                    mr.sharedMaterial = node.snapped != 0 ? _matSnapLocked : _matSnapIdle;
+                }
+
+                t.gameObject.SetActive(true);
+            }
+
+            for (var i = n; i < viz.SnapDots.Count; i++)
+            {
+                viz.SnapDots[i].gameObject.SetActive(false);
+            }
+        }
+
+        private void EnsureSnapDotCount(HandViz viz, uint hand, int n)
+        {
+            while (viz.SnapDots.Count < n)
+            {
+                var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                go.name = $"3OS_VoodooSnap_{(hand == 0 ? "L" : "R")}_{viz.SnapDots.Count}";
+                foreach (var col in go.GetComponents<Collider>())
+                {
+                    Destroy(col);
+                }
+
+                go.SetActive(false);
+                viz.SnapDots.Add(go.transform);
+            }
+        }
+
+        private static void HideSnapDots(HandViz viz)
+        {
+            foreach (var t in viz.SnapDots)
+            {
+                if (t != null) t.gameObject.SetActive(false);
+            }
         }
 
         private void UpdateWireBox(Transform root, LineRenderer lr, InteropVoodooBoundingBox bb)
@@ -155,6 +227,7 @@ namespace ThreeOS
             }
 
             viz.Arrow?.Hide();
+            HideSnapDots(viz);
             if (viz.FarRoot != null)
             {
                 viz.FarRoot.gameObject.SetActive(false);

@@ -237,6 +237,43 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_voodoo_get_drag_arrow(uint hand, out InteropVoodooDragArrow outArrow);
 
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_centroid();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void threeos_god_clear();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_god_register(
+            [MarshalAs(UnmanagedType.LPStr)] string name,
+            ref ThreeOSPose anchor,
+            out ulong outGodId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_god_set_anchor(ulong godId, ref ThreeOSPose anchor);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_set_god_root(ulong entityId, ulong godRootId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_layout_god(ulong godRootId, ref ThreeOSPose center);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_centroid_count();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_centroid_get(uint index, out InteropCentroid outCentroid);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_voodoo_snap_node();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_voodoo_snap_node_count(uint hand);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_get_snap_node(uint hand, uint index,
+            out InteropVoodooSnapNode outNode);
+
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
         public uint NativeVersion { get; private set; }
@@ -315,9 +352,11 @@ namespace ThreeOS
                     if (threeos_sizeof_voodoo_field_params() != InteropStructs.VoodooFieldParamsBytes ||
                         threeos_sizeof_voodoo_bounding_box() != InteropStructs.VoodooBoundingBoxBytes ||
                         threeos_sizeof_voodoo_session() != InteropStructs.VoodooSessionBytes ||
-                        threeos_sizeof_voodoo_drag_arrow() != InteropStructs.VoodooDragArrowBytes)
+                        threeos_sizeof_voodoo_drag_arrow() != InteropStructs.VoodooDragArrowBytes ||
+                        threeos_sizeof_centroid() != InteropStructs.CentroidBytes ||
+                        threeos_sizeof_voodoo_snap_node() != InteropStructs.VoodooSnapNodeBytes)
                     {
-                        LastError = "Voodoo ABI size mismatch";
+                        LastError = "Voodoo/centroid/snap-node ABI size mismatch";
                         IsLoaded = false;
                         Debug.LogError($"[3OS] {LastError}");
                         return;
@@ -477,6 +516,69 @@ namespace ThreeOS
         public bool SetVoodooFieldParams(InteropVoodooFieldParams parameters) =>
             IsLoaded && NativeAbiVersion >= 6 &&
             Call(() => threeos_voodoo_set_field_params(ref parameters));
+
+        public void GodClear()
+        {
+            if (!IsLoaded || NativeAbiVersion < 6) return;
+            try { threeos_god_clear(); }
+            catch (Exception ex) { LastError = ex.Message; }
+        }
+
+        public bool TryRegisterGod(string name, ThreeOSPose anchor, out ulong godId)
+        {
+            godId = 0;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_god_register(name ?? string.Empty, ref anchor, out godId);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool SetGodRoot(ulong entityId, ulong godRootId) =>
+            IsLoaded && NativeAbiVersion >= 6 &&
+            Call(() => threeos_storage_set_god_root(entityId, godRootId));
+
+        public bool LayoutGod(ulong godRootId, ThreeOSPose center) =>
+            IsLoaded && NativeAbiVersion >= 6 &&
+            Call(() => threeos_storage_layout_god(godRootId, ref center));
+
+        public uint CentroidCount =>
+            IsLoaded && NativeAbiVersion >= 6 ? threeos_centroid_count() : 0u;
+
+        public bool TryGetCentroid(uint index, out InteropCentroid centroid)
+        {
+            centroid = default;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_centroid_get(index, out centroid);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public uint VoodooSnapNodeCount(uint hand) =>
+            IsLoaded && NativeAbiVersion >= 6 ? threeos_voodoo_snap_node_count(hand) : 0u;
+
+        public bool TryGetVoodooSnapNode(uint hand, uint index, out InteropVoodooSnapNode node)
+        {
+            node = default;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_voodoo_get_snap_node(hand, index, out node);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
 
         public bool SetScale(float worldToProxyRatio) =>
             Call(() => threeos_topology_set_scale(worldToProxyRatio));

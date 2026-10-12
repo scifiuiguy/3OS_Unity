@@ -9,7 +9,7 @@ namespace ThreeOS
     /// </summary>
     public static class InteropStructs
     {
-        public const uint AbiVersion = 5;
+        public const uint AbiVersion = 6;
         public const int InputFrameBytes = 192;
         public const int TransformDeltaBytes = 48;
         public const int DomeStateBytes = 48;
@@ -26,6 +26,8 @@ namespace ThreeOS
         public const int VoodooBoundingBoxBytes = 80;
         public const int VoodooSessionBytes = 176;
         public const int VoodooDragArrowBytes = 64;
+        public const int CentroidBytes = 64;
+        public const int VoodooSnapNodeBytes = 48;
 
         public static void AssertLayout()
         {
@@ -45,6 +47,8 @@ namespace ThreeOS
             var voodooBbSize = Marshal.SizeOf<InteropVoodooBoundingBox>();
             var voodooSessionSize = Marshal.SizeOf<InteropVoodooSession>();
             var voodooArrowSize = Marshal.SizeOf<InteropVoodooDragArrow>();
+            var centroidSize = Marshal.SizeOf<InteropCentroid>();
+            var voodooSnapNodeSize = Marshal.SizeOf<InteropVoodooSnapNode>();
             Debug.Assert(inputSize == InputFrameBytes, $"InteropInputFrame size {inputSize} != {InputFrameBytes}");
             Debug.Assert(deltaSize == TransformDeltaBytes, $"InteropTransformDelta size {deltaSize} != {TransformDeltaBytes}");
             Debug.Assert(domeSize == DomeStateBytes, $"InteropDomeState size {domeSize} != {DomeStateBytes}");
@@ -61,6 +65,8 @@ namespace ThreeOS
             Debug.Assert(voodooBbSize == VoodooBoundingBoxBytes, $"InteropVoodooBoundingBox size {voodooBbSize} != {VoodooBoundingBoxBytes}");
             Debug.Assert(voodooSessionSize == VoodooSessionBytes, $"InteropVoodooSession size {voodooSessionSize} != {VoodooSessionBytes}");
             Debug.Assert(voodooArrowSize == VoodooDragArrowBytes, $"InteropVoodooDragArrow size {voodooArrowSize} != {VoodooDragArrowBytes}");
+            Debug.Assert(centroidSize == CentroidBytes, $"InteropCentroid size {centroidSize} != {CentroidBytes}");
+            Debug.Assert(voodooSnapNodeSize == VoodooSnapNodeBytes, $"InteropVoodooSnapNode size {voodooSnapNodeSize} != {VoodooSnapNodeBytes}");
         }
 
         /// <summary>Unity left-handed Y-up → OpenXR right-handed Y-up.</summary>
@@ -266,6 +272,42 @@ namespace ThreeOS
         public uint deadzoneArmed;
         public uint reserved1;
         public uint reserved2;
+    }
+
+    public enum CentroidKind : uint
+    {
+        None = 0,
+        God = 1,
+        Box = 2,
+    }
+
+    /// <summary>CharSet.Ansi + ByValTStr matches native char[16] (IL2CPP-safe).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4, CharSet = CharSet.Ansi)]
+    public struct InteropCentroid
+    {
+        public ulong id;
+        public uint kind;
+        public uint memberCount;
+        public ulong linkedEntityId;
+        public ThreeOSVec3 position;
+        public float unused0;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)]
+        public string name;
+        public uint reserved0;
+        public uint reserved1;
+    }
+
+    /// <summary>Task 6.3 snap-mode node near the yellow arrow (48 bytes).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropVoodooSnapNode
+    {
+        public ulong centroidId;
+        public uint kind;
+        public uint snapped;
+        public ThreeOSVec3 worldPosition;
+        public float radiusM;
+        public ThreeOSVec3 fieldPosition;
+        public float unused0;
     }
 
     /// <summary>128-byte Phase 0.5 hand sample (OpenXR meters).</summary>

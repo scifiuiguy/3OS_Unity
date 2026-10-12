@@ -14,6 +14,13 @@ namespace ThreeOS
     public sealed class ThreeOSStorageController : MonoBehaviour
     {
         public const string DemoFolderName = "3OS_Demo";
+        /// <summary>Second god-root folder for dual-centroid Quest fixture (Task 6.2).</summary>
+        public const string DemoFolderName2 = "3OS_Demo2";
+        /// <summary>Dual-god snap-test range from user (10 ft).</summary>
+        public const float GodFixtureRangeM = 10f * 0.3048f;
+        /// <summary>Dual-god snap-test height above head (2.5 ft; Quest-tuned from 10→5→2.5).</summary>
+        public const float GodFixtureHeightM = 2.5f * 0.3048f;
+        public const float GodFixtureAzimuthDeg = 15f;
         /// <summary>Glyph visual size in meters (matches Blender-authored 0.1 m packs).</summary>
         public const float GlyphSizeM = 0.1f;
         /// <summary>Dismiss-X sphere diameter (meters).</summary>
@@ -62,6 +69,7 @@ namespace ThreeOS
         private float _lastShortTapTime = -10f;
         private string _status = "storage idle";
         private string _demoRoot = string.Empty;
+        private string _demoRoot2 = string.Empty;
         private ThreeOSPose _layoutHeadPose;
         private bool _waitingForAllFilesAccess;
         private string _selectionLabel = "none";
@@ -140,6 +148,11 @@ namespace ThreeOS
             {
                 gameObject.AddComponent<ThreeOSVoodooController>();
             }
+
+            if (GetComponent<ThreeOSCentroidDebug>() == null)
+            {
+                gameObject.AddComponent<ThreeOSCentroidDebug>();
+            }
         }
 
         private Color ResolvedGlowColor =>
@@ -185,7 +198,8 @@ namespace ThreeOS
             // Packs only tint/resolve glyph ids — procedural cubes work without them.
             yield return InstallPacks();
             yield return EnsureDemoDirectory();
-            if (string.IsNullOrEmpty(_demoRoot) || !LoadDemoDirectory(_demoRoot))
+            yield return EnsureDemoDirectory2();
+            if (string.IsNullOrEmpty(_demoRoot))
             {
                 Debug.LogError($"[3OS] demo load aborted: {_status}");
                 yield break;
@@ -195,9 +209,10 @@ namespace ThreeOS
             HideLegacyPhase03Cube();
 
             yield return WaitForHeadPose();
-            if (!_bridge.StorageLayoutDemo(_layoutHeadPose))
+            if (!LoadDualGodFixture(_layoutHeadPose))
             {
-                Debug.LogWarning($"[3OS] layout warn: {_bridge.LastError} (continuing with default poses)");
+                Debug.LogError($"[3OS] dual-god load aborted: {_status}");
+                yield break;
             }
 
             DemoActive = true;
@@ -205,7 +220,7 @@ namespace ThreeOS
                       FindFirstObjectByType<ThreeOSKinematicsController>();
             kin?.PushKinematicsParams();
             RebuildViews();
-            _status = $"demo {_views.Count} glyphs @ {ShortPath(_demoRoot)}";
+            _status = $"demo {_views.Count} glyphs dual-god @ {ShortPath(_demoRoot)}";
             Debug.Log(
                 $"[3OS] demo loaded views={_views.Count} kernelItems={_bridge.StorageItemCount()} root={_demoRoot}");
 
@@ -504,33 +519,31 @@ namespace ThreeOS
             var docs = PreferredDocumentsDemoPath();
             var fallback = FallbackPersistentDemoPath();
 
-            // Quest: persistent is the writable root (Documents often listable but not writable).
-            // LoadDemoDirectory unions both roots, so MTP Documents folders still appear.
-#if UNITY_ANDROID && !UNITY_EDITOR
-            _demoRoot = fallback;
-#else
-            _demoRoot = DemoRootLooksPopulated(docs) ? docs : fallback;
-#endif
-
+            // Ensure both roots exist; inserts still prefer persistent when Documents is RO.
             try
             {
-                Directory.CreateDirectory(_demoRoot);
+                Directory.CreateDirectory(fallback);
             }
             catch (System.Exception ex)
             {
-                _status = $"cannot create demo dir: {ex.Message}";
-                Debug.LogError($"[3OS] {_status}");
-                _demoRoot = string.Empty;
-                yield break;
+                Debug.LogWarning($"[3OS] persistent demo create failed: {ex.Message}");
+            }
+
+            try
+            {
+                Directory.CreateDirectory(docs);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[3OS] Documents demo create failed: {ex.Message}");
             }
 
             // Folders alone are valid demo content (empty Boxes). Use Java-capable listing —
             // .NET Directory.GetFiles often returns empty on Quest Documents.
-            var persistentPopulated = DemoRootLooksPopulated(fallback);
             var docsPopulated = DemoRootLooksPopulated(docs);
+            var persistentPopulated = DemoRootLooksPopulated(fallback);
 
-            // Always ensure a writable simple.glb under persistent when missing. MTP files on
-            // Documents are often invisible to File.list / MediaStore until all-files access.
+            // Always ensure a writable simple.glb under persistent when missing.
             if (!FileLooksPresent(Path.Combine(fallback, "simple.glb")))
             {
                 yield return SeedRootObject(fallback, "simple.glb");
@@ -539,32 +552,25 @@ namespace ThreeOS
             persistentPopulated = DemoRootLooksPopulated(fallback) ||
                                   FileLooksPresent(Path.Combine(fallback, "simple.glb"));
 
-            if (!persistentPopulated && docsPopulated)
-            {
-                // User tree lives only under Documents — list from there.
-                _demoRoot = docs;
-            }
-
-            if (!DemoRootLooksPopulated(_demoRoot) && !docsPopulated && !persistentPopulated)
+            // Priority: Documents when populated (MTP staging), else persistent.
+            _demoRoot = PickDemoRoot(docs, fallback, docsPopulated, persistentPopulated);
+            if (string.IsNullOrEmpty(_demoRoot))
             {
                 _status = "no demo content — add files/folders under 3OS_Demo";
                 Debug.LogError($"[3OS] {_status} (persistent={fallback} docs={docs})");
-                _demoRoot = string.Empty;
                 yield break;
             }
 
-            // Additive sync only (never delete). On Quest, pull Documents → persistent so
-            // MTP-staged simple.glb becomes visible/writable under the app files root.
+            // Additive sync only (never delete). Documents ↔ persistent so MTP trees show
+            // and inserts still have a writable mirror under app files.
 #if UNITY_ANDROID && !UNITY_EDITOR
             TryMirrorDemoTree(docs, fallback);
             TryMirrorDemoTree(fallback, docs);
-            // Dirs visible but zero root files → likely scoped storage hiding MTP objects.
             if (DemoRootLooksPopulated(docs) &&
                 ThreeOSAndroidStorage.ListFileNames(docs).Count == 0 &&
                 !ThreeOSAndroidStorage.TryProbeFileName(docs, "simple.glb") &&
                 !ThreeOSAndroidStorage.IsExternalStorageManager())
             {
-                // Warn only — auto-launching settings kills the Quest XR session at boot.
                 Debug.LogWarning(
                     "[3OS] Documents has folders but no listable files — grant all-files access later if needed");
             }
@@ -572,10 +578,180 @@ namespace ThreeOS
             TryMirrorDemoTree(_demoRoot, _demoRoot == docs ? fallback : docs);
 #endif
 
+            // Re-pick after mirror in case Documents just became the richer tree.
+            docsPopulated = DemoRootLooksPopulated(docs);
+            persistentPopulated = DemoRootLooksPopulated(fallback);
+            _demoRoot = PickDemoRoot(docs, fallback, docsPopulated, persistentPopulated);
+
             Debug.Log(
-                $"[3OS] demo root = {_demoRoot} (persistentPopulated={persistentPopulated} docsPopulated={docsPopulated} " +
+                $"[3OS] demo root = {_demoRoot} (priority=Documents-when-populated; " +
+                $"persistentPopulated={persistentPopulated} docsPopulated={docsPopulated} " +
                 $"persistentGlb={FileLooksPresent(Path.Combine(fallback, "simple.glb"))} " +
                 $"docsGlb={FileLooksPresent(Path.Combine(docs, "simple.glb"))})");
+        }
+
+        private IEnumerator EnsureDemoDirectory2()
+        {
+            var docs2 = PreferredDocumentsDemoPath2();
+            var fallback2 = FallbackPersistentDemoPath2();
+            try { Directory.CreateDirectory(fallback2); }
+            catch (System.Exception ex) { Debug.LogWarning($"[3OS] Demo2 persistent create: {ex.Message}"); }
+            try { Directory.CreateDirectory(docs2); }
+            catch (System.Exception ex) { Debug.LogWarning($"[3OS] Demo2 Documents create: {ex.Message}"); }
+
+            var docsPopulated = DemoRootLooksPopulated(docs2);
+            var persistentPopulated = DemoRootLooksPopulated(fallback2);
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            TryMirrorDemoTree(docs2, fallback2);
+            TryMirrorDemoTree(fallback2, docs2);
+            docsPopulated = DemoRootLooksPopulated(docs2);
+            persistentPopulated = DemoRootLooksPopulated(fallback2);
+#endif
+
+            _demoRoot2 = PickDemoRoot(docs2, fallback2, docsPopulated, persistentPopulated);
+            if (string.IsNullOrEmpty(_demoRoot2))
+            {
+                _demoRoot2 = fallback2;
+                // Ensure at least one object so the god centroid is not omitted.
+                try
+                {
+                    var dest = Path.Combine(_demoRoot2, "simple.glb");
+                    var src = !string.IsNullOrEmpty(_demoRoot)
+                        ? Path.Combine(_demoRoot, "simple.glb")
+                        : string.Empty;
+                    if (!string.IsNullOrEmpty(src) && File.Exists(src))
+                    {
+                        File.Copy(src, dest, overwrite: false);
+                    }
+                    else if (!File.Exists(dest) &&
+                             !File.Exists(Path.Combine(_demoRoot2, "marker.txt")))
+                    {
+                        File.WriteAllText(Path.Combine(_demoRoot2, "marker.txt"), "3OS_Demo2");
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning($"[3OS] Demo2 seed failed: {ex.Message}");
+                }
+            }
+
+            Debug.Log(
+                $"[3OS] demo2 root = {_demoRoot2} (docsPopulated={docsPopulated} " +
+                $"persistentPopulated={persistentPopulated})");
+            yield return null;
+        }
+
+        /// <summary>
+        /// Prefer Documents when it has content (MTP staging); otherwise persistent.
+        /// Empty string if neither is usable.
+        /// </summary>
+        private static string PickDemoRoot(string docs, string persistent, bool docsPopulated,
+            bool persistentPopulated)
+        {
+            if (docsPopulated)
+            {
+                return docs;
+            }
+
+            if (persistentPopulated)
+            {
+                return persistent;
+            }
+
+            return string.Empty;
+        }
+
+        public static string PreferredDocumentsDemoPath2()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            return "/storage/emulated/0/Documents/" + DemoFolderName2;
+#else
+            return Path.Combine(System.Environment.GetFolderPath(
+                System.Environment.SpecialFolder.MyDocuments), DemoFolderName2);
+#endif
+        }
+
+        public static string FallbackPersistentDemoPath2() =>
+            Path.Combine(Application.persistentDataPath, DemoFolderName2);
+
+        /// <summary>
+        /// Task 6.2 Quest fixture: two gods at 10 ft, ±15° azimuth, 2.5 ft up.
+        /// </summary>
+        private bool LoadDualGodFixture(ThreeOSPose head)
+        {
+            _bridge.StorageClear();
+            _bridge.GodClear();
+
+            var leftAnchor = GodFixturePose(head, -GodFixtureAzimuthDeg);
+            var rightAnchor = GodFixturePose(head, GodFixtureAzimuthDeg);
+            if (!_bridge.TryRegisterGod(DemoFolderName, leftAnchor, out var godL) ||
+                !_bridge.TryRegisterGod(DemoFolderName2, rightAnchor, out var godR))
+            {
+                _status = $"god register failed: {_bridge.LastError}";
+                return false;
+            }
+
+            if (!LoadDemoDirectory(_demoRoot, godL, clearFirst: false))
+            {
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(_demoRoot2) ||
+                !LoadDemoDirectory(_demoRoot2, godR, clearFirst: false))
+            {
+                Debug.LogWarning($"[3OS] Demo2 load weak: {_status} — continuing with god L only");
+            }
+
+            if (!_bridge.LayoutGod(godL, leftAnchor))
+            {
+                Debug.LogWarning($"[3OS] layout god L: {_bridge.LastError}");
+            }
+
+            if (!_bridge.LayoutGod(godR, rightAnchor))
+            {
+                Debug.LogWarning($"[3OS] layout god R: {_bridge.LastError}");
+            }
+
+            Debug.Log($"[3OS] dual-god fixture L={godL} R={godR}");
+            return true;
+        }
+
+        private static ThreeOSPose GodFixturePose(ThreeOSPose head, float azimuthDeg)
+        {
+            // OpenXR yaw-only forward (−Z) and right (+X).
+            var q = new Quaternion(head.orientation.x, head.orientation.y, head.orientation.z,
+                head.orientation.w);
+            var fwd = q * new Vector3(0f, 0f, -1f);
+            fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-6f)
+            {
+                fwd = new Vector3(0f, 0f, -1f);
+            }
+
+            fwd.Normalize();
+            var right = Vector3.Cross(Vector3.up, fwd).normalized;
+            var rad = azimuthDeg * Mathf.Deg2Rad;
+            var dir = (Mathf.Cos(rad) * fwd + Mathf.Sin(rad) * right).normalized;
+            var pos = new Vector3(
+                head.position.x + dir.x * GodFixtureRangeM,
+                head.position.y + GodFixtureHeightM,
+                head.position.z + dir.z * GodFixtureRangeM);
+            // Face user: yaw from dir toward −dir (billboard-ish).
+            var face = -dir;
+            var yaw = Mathf.Atan2(face.x, -face.z);
+            var half = yaw * 0.5f;
+            return new ThreeOSPose
+            {
+                position = new ThreeOSVec3 { x = pos.x, y = pos.y, z = pos.z },
+                orientation = new ThreeOSQuat
+                {
+                    x = 0f,
+                    y = Mathf.Sin(half),
+                    z = 0f,
+                    w = Mathf.Cos(half)
+                }
+            };
         }
 
         /// <summary>
@@ -786,9 +962,16 @@ namespace ThreeOS
         /// root folders are Boxes (with child counts). Files already inside a box are not
         /// re-instanced in the near field.
         /// </summary>
-        private bool LoadDemoDirectory(string root)
+        private bool LoadDemoDirectory(string root) =>
+            LoadDemoDirectory(root, godRootId: 0, clearFirst: true);
+
+        private bool LoadDemoDirectory(string root, ulong godRootId, bool clearFirst)
         {
-            _bridge.StorageClear();
+            if (clearFirst)
+            {
+                _bridge.StorageClear();
+            }
+
             if (string.IsNullOrEmpty(root) ||
                 (!Directory.Exists(root) && !ThreeOSAndroidStorage.Exists(root)))
             {
@@ -797,10 +980,12 @@ namespace ThreeOS
                 return false;
             }
 
-            // Union listings across demo roots so Quest Documents + persistent both contribute.
+            // Union listings for this folder name across Documents + persistent mirrors.
+            var folderLeaf = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar));
             var fileNames = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
             var dirNames = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
-            foreach (var candidateRoot in CandidateDemoRoots())
+            foreach (var candidateRoot in CandidateDemoRootsFor(folderLeaf))
             {
                 if (string.IsNullOrEmpty(candidateRoot))
                 {
@@ -822,8 +1007,7 @@ namespace ThreeOS
                     dirNames.Add(name);
                 }
 
-                // Directory listing often omits MTP .glb; probe known/seed object names.
-                foreach (var probe in new[] { "simple.glb", "simple.gltf" })
+                foreach (var probe in new[] { "simple.glb", "simple.gltf", "marker.txt" })
                 {
                     if (ThreeOSAndroidStorage.TryProbeFileName(candidateRoot, probe))
                     {
@@ -832,7 +1016,6 @@ namespace ThreeOS
                 }
             }
 
-            // Prefer primary root listing order: files then dirs (sorted for stable matrix).
             var files = new List<string>(fileNames);
             var dirs = new List<string>(dirNames);
             files.Sort(System.StringComparer.OrdinalIgnoreCase);
@@ -844,15 +1027,20 @@ namespace ThreeOS
             {
                 foreach (var name in files)
                 {
-                    if (!_bridge.StorageAddObject(name, name, out _))
+                    if (!_bridge.StorageAddObject(name, name, out var eid))
                     {
                         _status = $"add object failed: {_bridge.LastError}";
                         Debug.LogError($"[3OS] {_status}");
                         return false;
                     }
 
+                    if (godRootId != 0 && !_bridge.SetGodRoot(eid, godRootId))
+                    {
+                        Debug.LogWarning($"[3OS] set god root failed: {_bridge.LastError}");
+                    }
+
                     added++;
-                    Debug.Log($"[3OS] listed object {name}");
+                    Debug.Log($"[3OS] listed object {name} god={godRootId}");
                 }
 
                 foreach (var name in dirs)
@@ -860,16 +1048,21 @@ namespace ThreeOS
                     var dirPath = Path.Combine(root, name);
                     var childCount = CountFolderContents(dirPath, name, root);
 
-                    if (!_bridge.StorageAddBox(name, name, childCount, out _))
+                    if (!_bridge.StorageAddBox(name, name, childCount, out var bid))
                     {
                         _status = $"add box failed: {_bridge.LastError}";
                         Debug.LogError($"[3OS] {_status}");
                         return false;
                     }
 
+                    if (godRootId != 0 && !_bridge.SetGodRoot(bid, godRootId))
+                    {
+                        Debug.LogWarning($"[3OS] set god root failed: {_bridge.LastError}");
+                    }
+
                     added++;
                     boxes++;
-                    Debug.Log($"[3OS] listed box {name} ({childCount} children)");
+                    Debug.Log($"[3OS] listed box {name} ({childCount} children) god={godRootId}");
                 }
             }
             catch (System.Exception ex)
@@ -888,7 +1081,6 @@ namespace ThreeOS
 
             _status = $"listed {added} ({boxes} folders)";
             Debug.Log($"[3OS] {_status} from {root} (files={files.Count} dirs={dirs.Count})");
-            // Layout (cubic matrix in front of HMD) runs after head pose is available.
             return true;
         }
 
@@ -2802,19 +2994,35 @@ namespace ThreeOS
             }
         }
 
-        private IEnumerable<string> CandidateDemoRoots()
+        private IEnumerable<string> CandidateDemoRoots() =>
+            CandidateDemoRootsFor(DemoFolderName);
+
+        private IEnumerable<string> CandidateDemoRootsFor(string folderLeaf)
         {
-            if (!string.IsNullOrEmpty(_demoRoot))
+            if (string.IsNullOrEmpty(folderLeaf))
+            {
+                yield break;
+            }
+
+            // Documents first (MTP staging), then persistent writable mirror, then primary root.
+#if UNITY_ANDROID && !UNITY_EDITOR
+            yield return "/storage/emulated/0/Documents/" + folderLeaf;
+#else
+            yield return Path.Combine(System.Environment.GetFolderPath(
+                System.Environment.SpecialFolder.MyDocuments), folderLeaf);
+#endif
+            yield return Path.Combine(Application.persistentDataPath, folderLeaf);
+
+            if (string.Equals(folderLeaf, DemoFolderName, System.StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrEmpty(_demoRoot))
             {
                 yield return _demoRoot;
             }
 
-            yield return FallbackPersistentDemoPath();
-
-            var docs = PreferredDocumentsDemoPath();
-            if (!string.IsNullOrEmpty(docs))
+            if (string.Equals(folderLeaf, DemoFolderName2, System.StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrEmpty(_demoRoot2))
             {
-                yield return docs;
+                yield return _demoRoot2;
             }
         }
 
