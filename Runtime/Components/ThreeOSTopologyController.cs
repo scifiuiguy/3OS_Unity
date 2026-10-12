@@ -20,8 +20,11 @@ namespace ThreeOS
         private bool _menuWasDown;
         private bool _selectWasDown;
         private bool _grabWasDown;
+        private bool _voodooWasHeld;
         private bool _holding;
         private bool _objectInFar;
+        /// <summary>Hand latched for portal grab / voodoo aim: 0=left, 1=right, -1=any.</summary>
+        private int _activeHand = -1;
         private string _status = "idle";
 
         public string Status => _status;
@@ -51,6 +54,35 @@ namespace ThreeOS
             var menu = (frame.buttonFlags & (uint)ButtonFlags.Menu) != 0;
             var select = (frame.buttonFlags & (uint)(ButtonFlags.RightSelect | ButtonFlags.LeftSelect)) != 0;
             var grab = (frame.buttonFlags & (uint)(ButtonFlags.RightGrab | ButtonFlags.LeftGrab)) != 0;
+            var intents = _input.LastIntents;
+            var voodoo = (intents.flags & (uint)InteractionIntentFlags.VoodooHold) != 0;
+
+            // Palm-down primary hold → voodoo volume (dome). Menu still toggles as fallback.
+            if (voodoo)
+            {
+                if (!_voodooWasHeld)
+                {
+                    _activeHand = (int)intents.handedness;
+                }
+
+                if (!DomeActive)
+                {
+                    if (_bridge.OpenDome(frame.head))
+                    {
+                        DomeActive = true;
+                        _status = "voodoo dome (palm-down hold)";
+                    }
+                }
+                else
+                {
+                    // Keep dome posed from head while held (Phase 0.5 stub).
+                    _bridge.OpenDome(frame.head);
+                }
+            }
+            else if (_voodooWasHeld && DomeActive)
+            {
+                _status = "voodoo released — Select opens lattice";
+            }
 
             if (menu && !_menuWasDown)
             {
@@ -67,27 +99,45 @@ namespace ThreeOS
             {
                 if (grab && !_grabWasDown)
                 {
+                    var leftGrab = (frame.buttonFlags & (uint)ButtonFlags.LeftGrab) != 0;
+                    var rightGrab = (frame.buttonFlags & (uint)ButtonFlags.RightGrab) != 0;
+                    if (leftGrab && !rightGrab)
+                    {
+                        _activeHand = 0;
+                    }
+                    else if (rightGrab && !leftGrab)
+                    {
+                        _activeHand = 1;
+                    }
+                    else
+                    {
+                        _activeHand = (int)intents.handedness;
+                    }
+
                     BeginHold();
                 }
 
                 if (_holding && grab)
                 {
-                    FollowAim(frame);
+                    FollowAim();
                 }
 
                 if (!grab && _grabWasDown && _holding)
                 {
                     EndHoldPortal();
+                    _activeHand = -1;
                 }
             }
             else if (_holding)
             {
                 _holding = false;
+                _activeHand = -1;
             }
 
             _menuWasDown = menu;
             _selectWasDown = select;
             _grabWasDown = grab;
+            _voodooWasHeld = voodoo;
 
             SyncVisuals();
         }
@@ -141,12 +191,14 @@ namespace ThreeOS
             _status = "holding";
         }
 
-        private void FollowAim(InteropInputFrame frame)
+        private void FollowAim()
         {
-            if (_cube == null) return;
-            var aim = (frame.trackingFlags & (uint)TrackingFlags.RightAim) != 0
-                ? frame.rightAim
-                : frame.leftAim;
+            if (_cube == null || _input == null)
+            {
+                return;
+            }
+
+            var aim = _input.AimPoseForHand(_activeHand);
             var pose = InteropStructs.ToUnityPose(aim);
             _cube.transform.position = pose.position + pose.rotation * Vector3.forward * 0.25f;
             _cube.transform.rotation = pose.rotation;

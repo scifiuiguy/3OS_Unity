@@ -102,6 +102,13 @@ namespace ThreeOS
         private static extern int threeos_kinematics_possess(ulong entityId, ref ThreeOSPose objectPose);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_possess_with_hand(ulong entityId, ref ThreeOSPose objectPose,
+            uint hand);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_set_drive_hand(uint hand);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_kinematics_release();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
@@ -184,6 +191,28 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern void threeos_selection_clear();
 
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_hand_sample();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_point_cursor();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_interaction_intents();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_interaction_set_hands(ref InteropHandSample left,
+            ref InteropHandSample right);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_interaction_get_cursor(uint hand, out InteropPointCursor outCursor);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_interaction_get_intents(out InteropInteractionIntents outIntents);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_interaction_set_pinch_thresh_m(float meters);
+
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
         public uint NativeVersion { get; private set; }
@@ -238,6 +267,19 @@ namespace ThreeOS
                         threeos_sizeof_storage_event() != InteropStructs.StorageEventBytes)
                     {
                         LastError = "Storage ABI size mismatch";
+                        IsLoaded = false;
+                        Debug.LogError($"[3OS] {LastError}");
+                        return;
+                    }
+                }
+
+                if (NativeAbiVersion >= 5)
+                {
+                    if (threeos_sizeof_hand_sample() != InteropStructs.HandSampleBytes ||
+                        threeos_sizeof_point_cursor() != InteropStructs.PointCursorBytes ||
+                        threeos_sizeof_interaction_intents() != InteropStructs.InteractionIntentsBytes)
+                    {
+                        LastError = "Hand-interaction ABI size mismatch";
                         IsLoaded = false;
                         Debug.LogError($"[3OS] {LastError}");
                         return;
@@ -310,6 +352,48 @@ namespace ThreeOS
                 return false;
             }
         }
+
+        public bool SetHands(ref InteropHandSample left, ref InteropHandSample right)
+        {
+            if (!IsLoaded || NativeAbiVersion < 5) return false;
+            try
+            {
+                var rc = threeos_interaction_set_hands(ref left, ref right);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool TryGetCursor(uint hand, out InteropPointCursor cursor)
+        {
+            cursor = default;
+            if (!IsLoaded || NativeAbiVersion < 5) return false;
+            try
+            {
+                var rc = threeos_interaction_get_cursor(hand, out cursor);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool TryGetIntents(out InteropInteractionIntents intents)
+        {
+            intents = default;
+            if (!IsLoaded || NativeAbiVersion < 5) return false;
+            try
+            {
+                var rc = threeos_interaction_get_intents(out intents);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
 
         public bool SetScale(float worldToProxyRatio) =>
             Call(() => threeos_topology_set_scale(worldToProxyRatio));
@@ -465,6 +549,15 @@ namespace ThreeOS
 
         public bool Possess(ulong entityId, ThreeOSPose objectPose) =>
             Call(() => threeos_kinematics_possess(entityId, ref objectPose));
+
+        /// <summary>Possess and latch stick/drag to hand (0=left, 1=right) atomically.</summary>
+        public bool PossessWithHand(ulong entityId, ThreeOSPose objectPose, int hand) =>
+            Call(() => threeos_kinematics_possess_with_hand(entityId, ref objectPose,
+                hand < 0 ? 0u : (uint)(hand > 1 ? 1 : hand)));
+
+        /// <summary>0=left, 1=right — latch stick/drag to this hand after <see cref="Possess"/>.</summary>
+        public bool SetDriveHand(int hand) =>
+            Call(() => threeos_kinematics_set_drive_hand(hand < 0 ? 0u : (uint)hand));
 
         public bool ReleasePossessed() => Call(threeos_kinematics_release);
 

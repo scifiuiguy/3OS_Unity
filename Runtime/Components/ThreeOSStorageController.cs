@@ -10,6 +10,7 @@ namespace ThreeOS
     /// Phase 0.4: list demo dir, cubic matrix glyphs + labels, trigger tap select / hold drag,
     /// snap-insert with open/bump/close, write-through FS cut, glow selection materials.
     /// </summary>
+    [DefaultExecutionOrder(0)]
     public sealed class ThreeOSStorageController : MonoBehaviour
     {
         public const string DemoFolderName = "3OS_Demo";
@@ -45,8 +46,16 @@ namespace ThreeOS
         private float _triggerDownTime;
         private bool _triggerDragActive;
         private bool _triggerGestureConsumed;
+        /// <summary>Hand that started the current trigger press: 0=left, 1=right, -1=none.</summary>
+        private int _selectHand = -1;
         private bool _possessing;
         private ulong _possessedId;
+
+        /// <summary>
+        /// While telekinesis is active, which hand must drive stick/kinematics (0/1), else -1.
+        /// InputRouter reads this before <c>Tick</c> to mute the other hand.
+        /// </summary>
+        public int PossessDriveHand => _possessing && _selectHand >= 0 ? _selectHand : -1;
         private bool _insertAnimBusy;
         private bool _boxAnimBusy;
         private ulong _lastShortTapId;
@@ -196,8 +205,13 @@ namespace ThreeOS
             Debug.Log(
                 $"[3OS] demo loaded views={_views.Count} kernelItems={_bridge.StorageItemCount()} root={_demoRoot}");
 
-            // Ask before the first drop so cut isn't attempted without delete rights.
-            yield return EnsureAllFilesAccessForCut("grant All files access, then drag to insert");
+            // Do not open MANAGE_EXTERNAL_STORAGE settings here — on Quest that
+            // leaves immersive XR (session STOPPING / app quit). Request on first cut/drop.
+            if (!ThreeOSAndroidStorage.IsExternalStorageManager())
+            {
+                Debug.Log(
+                    "[3OS] all-files access not granted yet (OK for boot; will prompt on cut/drop)");
+            }
         }
 
         private void OnApplicationFocus(bool hasFocus)
@@ -271,15 +285,16 @@ namespace ThreeOS
 
         private IEnumerator WaitForHeadPose()
         {
-            // Prefer real XR head tracking — Camera.main can exist before tracking and sit off to
-            // the side, which used to place the whole demo field beside the user.
-            var deadline = Time.realtimeSinceStartup + 5f;
+            // Prefer real XR head tracking — Camera.main can exist before tracking and sit on
+            // the floor origin, which plants the whole demo field in the ground.
+            var deadline = Time.realtimeSinceStartup + 8f;
             while (Time.realtimeSinceStartup < deadline)
             {
                 if (_input != null)
                 {
                     var frame = _input.LastFrame;
-                    if ((frame.trackingFlags & (uint)TrackingFlags.Head) != 0)
+                    if ((frame.trackingFlags & (uint)TrackingFlags.Head) != 0 &&
+                        frame.head.position.y > 0.8f)
                     {
                         _layoutHeadPose = frame.head;
                         Debug.Log("[3OS] layout head from XR tracking");
@@ -287,15 +302,27 @@ namespace ThreeOS
                     }
                 }
 
+                var cam = Camera.main;
+                if (cam != null && cam.transform.position.y > 0.8f)
+                {
+                    _layoutHeadPose =
+                        InteropStructs.ToOpenXrPose(new Pose(cam.transform.position, cam.transform.rotation));
+                    Debug.Log("[3OS] layout head from Camera.main (elevated)");
+                    yield break;
+                }
+
                 yield return null;
             }
 
-            var cam = Camera.main;
-            if (cam != null)
+            if (_input != null && (_input.LastFrame.trackingFlags & (uint)TrackingFlags.Head) != 0)
             {
-                _layoutHeadPose =
-                    InteropStructs.ToOpenXrPose(new Pose(cam.transform.position, cam.transform.rotation));
-                Debug.LogWarning("[3OS] layout head from Camera.main (no XR head flag yet)");
+                _layoutHeadPose = _input.LastFrame.head;
+                if (_layoutHeadPose.position.y < 0.8f)
+                {
+                    _layoutHeadPose.position.y = 1.5f;
+                }
+
+                Debug.LogWarning("[3OS] layout head from XR (y clamped)");
                 yield break;
             }
 
@@ -320,8 +347,9 @@ namespace ThreeOS
             }
 
             SyncViewsFromKernel();
-            HandleTriggerSelectAndDrag();
+            // X hover before trigger so left-hand press can close on the same frame.
             UpdateExpandedDismissAffordances();
+            HandleTriggerSelectAndDrag();
             SyncSelectionMaterials();
             UpdateInsertArrow();
             HandleStorageEvents();
@@ -532,9 +560,9 @@ namespace ThreeOS
                 !ThreeOSAndroidStorage.TryProbeFileName(docs, "simple.glb") &&
                 !ThreeOSAndroidStorage.IsExternalStorageManager())
             {
+                // Warn only — auto-launching settings kills the Quest XR session at boot.
                 Debug.LogWarning(
-                    "[3OS] Documents has folders but no listable files — requesting all-files access");
-                ThreeOSAndroidStorage.RequestManageAllFilesAccess();
+                    "[3OS] Documents has folders but no listable files — grant all-files access later if needed");
             }
 #else
             TryMirrorDemoTree(_demoRoot, _demoRoot == docs ? fallback : docs);
@@ -1496,17 +1524,30 @@ namespace ThreeOS
                 _triggerWasDown = false;
                 _triggerDragActive = false;
                 _triggerGestureConsumed = false;
+                _selectHand = -1;
                 return;
             }
 
             var frame = _input.LastFrame;
-            var triggerDown = frame.leftTrigger >= TriggerAxisThreshold ||
-                              frame.rightTrigger >= TriggerAxisThreshold;
-            var aim = AimPose(frame);
-            var aimUnity = InteropStructs.ToUnityPose(aim);
+            var leftDown = frame.leftTrigger >= TriggerAxisThreshold;
+            var rightDown = frame.rightTrigger >= TriggerAxisThreshold;
+            var triggerDown = leftDown || rightDown;
 
             if (triggerDown && !_triggerWasDown)
             {
+                if (leftDown && !rightDown)
+                {
+                    _selectHand = 0;
+                }
+                else if (rightDown && !leftDown)
+                {
+                    _selectHand = 1;
+                }
+                else
+                {
+                    _selectHand = frame.leftTrigger >= frame.rightTrigger ? 0 : 1;
+                }
+
                 _triggerDownTime = Time.unscaledTime;
                 _triggerDragActive = false;
                 _triggerGestureConsumed = false;
@@ -1516,13 +1557,23 @@ namespace ThreeOS
                 }
             }
 
+            var aimUnity = SelectAimUnity(_selectHand, out var rayDir);
+
             if (triggerDown && _triggerWasDown && !_triggerDragActive && !_possessing &&
                 !_triggerGestureConsumed)
             {
                 if (Time.unscaledTime - _triggerDownTime >= TriggerHoldDragSeconds)
                 {
-                    _triggerDragActive = true;
-                    TryPossessNearest(aimUnity.position);
+                    // Use the pressing hand's cursor palm (not aggregated intents — those
+                    // can prefer the other hand). Re-evaluate each frame so a brief
+                    // palm-down does not permanently block a later sideways drag.
+                    var palm = SelectHandPalmMode();
+                    if (palm == PalmMode.Sideways)
+                    {
+                        _triggerDragActive = true;
+                        TryPossessNearest(aimUnity.position);
+                    }
+                    // Palm down → voodoo (Topology). Palm up → wait (Quest OS).
                 }
             }
 
@@ -1539,14 +1590,20 @@ namespace ThreeOS
                         ReleasePossessedFromTrigger();
                     }
                 }
+                else if (SelectHandPalmMode() == PalmMode.Down &&
+                         Time.unscaledTime - _triggerDownTime >= TriggerHoldDragSeconds)
+                {
+                    // Held palm-down for voodoo — do not treat release as a select tap.
+                }
                 else
                 {
                     // Short press: double-tap Box opens; else select hit glyph or clear.
-                    HandleShortTriggerTap(aimUnity.position, aimUnity.rotation * Vector3.forward);
+                    HandleShortTriggerTap(aimUnity.position, rayDir);
                 }
 
                 _triggerDragActive = false;
                 _triggerGestureConsumed = false;
+                _selectHand = -1;
             }
 
             _triggerWasDown = triggerDown;
@@ -1633,6 +1690,36 @@ namespace ThreeOS
             _triggerDragActive = false;
         }
 
+        private bool PossessForSelectHand(ulong entityId, ThreeOSPose objectPose)
+        {
+            if (_selectHand >= 0)
+            {
+                return _bridge.PossessWithHand(entityId, objectPose, _selectHand);
+            }
+
+            return _bridge.Possess(entityId, objectPose);
+        }
+
+        private PalmMode SelectHandPalmMode()
+        {
+            if (_input == null)
+            {
+                return PalmMode.Sideways;
+            }
+
+            if (_selectHand == 0 && _input.LastLeftCursor.active != 0)
+            {
+                return (PalmMode)_input.LastLeftCursor.palmMode;
+            }
+
+            if (_selectHand == 1 && _input.LastRightCursor.active != 0)
+            {
+                return (PalmMode)_input.LastRightCursor.palmMode;
+            }
+
+            return (PalmMode)_input.LastIntents.palmMode;
+        }
+
         private void TryPossessNearest(Vector3 aimUnity)
         {
             // Clear a stuck FS event so a prior failed insert cannot block the next grab/commit.
@@ -1654,7 +1741,7 @@ namespace ThreeOS
                 TryFindItem(selectedId, out var selectedItem) &&
                 (selectedItem.kind == 0 || selectedItem.kind == 1))
             {
-                if (_bridge.Possess(selectedId, selectedView.Movable.CurrentOpenXrPose()))
+                if (PossessForSelectHand(selectedId, selectedView.Movable.CurrentOpenXrPose()))
                 {
                     _possessing = true;
                     _possessedId = selectedId;
@@ -1703,7 +1790,7 @@ namespace ThreeOS
                 return;
             }
 
-            if (_bridge.Possess(bestId, bestPose))
+            if (PossessForSelectHand(bestId, bestPose))
             {
                 _possessing = true;
                 _possessedId = bestId;
@@ -2823,6 +2910,48 @@ namespace ThreeOS
             return frame.head;
         }
 
+        /// <summary>
+        /// Prefer Phase 0.5 point-cursor probe for <paramref name="hand"/> (0=left, 1=right, -1=any);
+        /// ray dir uses head forward when that cursor is active.
+        /// </summary>
+        private Pose SelectAimUnity(int hand, out Vector3 rayDir)
+        {
+            var aim = _input != null
+                ? _input.AimPoseForHand(hand)
+                : AimPose(_input != null ? _input.LastFrame : default);
+            var pose = InteropStructs.ToUnityPose(aim);
+            var cursorActive = false;
+            if (_input != null)
+            {
+                if (hand == 0)
+                {
+                    cursorActive = _input.LastLeftCursor.active != 0;
+                }
+                else if (hand == 1)
+                {
+                    cursorActive = _input.LastRightCursor.active != 0;
+                }
+                else
+                {
+                    cursorActive = _input.LastLeftCursor.active != 0 ||
+                                   _input.LastRightCursor.active != 0;
+                }
+            }
+
+            if (cursorActive && Camera.main != null)
+            {
+                rayDir = Camera.main.transform.forward;
+            }
+            else
+            {
+                rayDir = pose.rotation * Vector3.forward;
+            }
+
+            return pose;
+        }
+
+        private Pose SelectAimUnity(out Vector3 rayDir) => SelectAimUnity(-1, out rayDir);
+
         private bool TryBeginCloseOnXHover()
         {
             if (_boxAnimBusy || _xHoverBoxId == 0 || !_expandedBoxes.ContainsKey(_xHoverBoxId))
@@ -2842,12 +2971,28 @@ namespace ThreeOS
                 return;
             }
 
-            var aimUnity = InteropStructs.ToUnityPose(AimPose(_input.LastFrame));
-            var aimPos = aimUnity.position;
-            // Pure distance test (no physics/colliders). Hysteresis so 2× hover scale
-            // does not flicker in/out at the sphere edge.
+            // Test BOTH point cursors so left hand can hover/close X (not right-only).
             var enterRadius = DismissXDiameterM * 0.5f;
             var exitRadius = enterRadius * 2.25f;
+            var cursors = new Vector3[2];
+            var cursorCount = 0;
+            if (_input.LastLeftCursor.active != 0)
+            {
+                cursors[cursorCount++] =
+                    InteropStructs.OpenXrToUnityPosition(_input.LastLeftCursor.position.ToVector3());
+            }
+
+            if (_input.LastRightCursor.active != 0)
+            {
+                cursors[cursorCount++] =
+                    InteropStructs.OpenXrToUnityPosition(_input.LastRightCursor.position.ToVector3());
+            }
+
+            if (cursorCount == 0)
+            {
+                var aimUnity = SelectAimUnity(out _);
+                cursors[cursorCount++] = aimUnity.position;
+            }
 
             foreach (var kv in _expandedBoxes)
             {
@@ -2868,7 +3013,12 @@ namespace ThreeOS
                         Quaternion.LookRotation((cam.transform.position - xPos).normalized, Vector3.up);
                 }
 
-                var dist = Vector3.Distance(aimPos, xPos);
+                var dist = float.MaxValue;
+                for (var i = 0; i < cursorCount; i++)
+                {
+                    dist = Mathf.Min(dist, Vector3.Distance(cursors[i], xPos));
+                }
+
                 if (ui.Hovered)
                 {
                     ui.Hovered = dist <= exitRadius;
@@ -2911,9 +3061,10 @@ namespace ThreeOS
 
             _boxAnimBusy = true;
             var boxName = boxItem.Name;
+            var boxRel = ResolveBoxRelativePath(boxId);
             try
             {
-                if (!EnsureBoxChildren(boxId, boxName, out var childIds))
+                if (!EnsureBoxChildren(boxId, boxRel, out var childIds))
                 {
                     _status = $"open failed: {_bridge.LastError}";
                     yield break;
@@ -3048,7 +3199,7 @@ namespace ThreeOS
 
         private IEnumerator CloseBoxSequence(ulong boxId)
         {
-            if (_boxAnimBusy || !_expandedBoxes.TryGetValue(boxId, out var ui))
+            if (_boxAnimBusy || !_expandedBoxes.ContainsKey(boxId))
             {
                 yield break;
             }
@@ -3057,99 +3208,9 @@ namespace ThreeOS
             _xHoverBoxId = 0;
             try
             {
-                var childIds = new List<ulong>(ui.ChildIds);
-                Vector3 centroid = Vector3.zero;
-                var n = 0;
-                foreach (var childId in childIds)
-                {
-                    if (_views.TryGetValue(childId, out var childView) && childView.Root != null &&
-                        childView.Root.activeInHierarchy)
-                    {
-                        centroid += childView.Root.transform.position;
-                        n++;
-                    }
-                }
-
-                Vector3 xPos;
-                if (_views.TryGetValue(boxId, out var boxView) && boxView.Root != null)
-                {
-                    xPos = boxView.Root.transform.position + boxView.Root.transform.up * BoxDismissXOffsetM;
-                }
-                else
-                {
-                    xPos = ui.XRoot != null ? ui.XRoot.transform.position : centroid;
-                }
-
-                if (n > 0)
-                {
-                    centroid /= n;
-                }
-                else
-                {
-                    centroid = xPos;
-                }
-
-                foreach (var childId in childIds)
-                {
-                    _animLockedIds.Add(childId);
-                }
-
-                const float endScale = 0.001f;
-                var animNode = new GameObject($"3OS_CollapseAnim_{boxId}");
-                animNode.transform.SetPositionAndRotation(centroid, Quaternion.identity);
-                animNode.transform.localScale = Vector3.one;
-                foreach (var childId in childIds)
-                {
-                    if (_views.TryGetValue(childId, out var childView) && childView.Root != null)
-                    {
-                        childView.Root.transform.SetParent(animNode.transform, true);
-                        childView.Root.transform.localScale = Vector3.one;
-                    }
-                }
-
-                var duration = Mathf.Max(0.05f, BoxExpandAnimSeconds);
-                var elapsed = 0f;
-                while (elapsed < duration)
-                {
-                    elapsed += Time.unscaledDeltaTime;
-                    var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(elapsed / duration));
-                    animNode.transform.position = Vector3.Lerp(centroid, xPos, u);
-                    animNode.transform.localScale = Vector3.one * Mathf.Lerp(1f, endScale, u);
-                    yield return null;
-                }
-
-                foreach (var childId in childIds)
-                {
-                    if (_views.TryGetValue(childId, out var childView) && childView.Root != null)
-                    {
-                        childView.Root.transform.SetParent(null, true);
-                        childView.Root.transform.localScale = Vector3.one;
-                        childView.Root.SetActive(false);
-                    }
-                }
-
-                Destroy(animNode);
-                if (ui.XRoot != null)
-                {
-                    Destroy(ui.XRoot);
-                }
-
-                _expandedBoxes.Remove(boxId);
-
-                if (!_bridge.CollapseBox(boxId))
-                {
-                    _status = $"collapse failed: {_bridge.LastError}";
-                }
-                else
-                {
-                    _bridge.SetBoxOpen(boxId, false);
-                    _status = "box closed";
-                }
-
-                foreach (var childId in childIds)
-                {
-                    _animLockedIds.Remove(childId);
-                }
+                // Nested opens: animate deepest → shallowest, then this box (not an
+                // instant TeardownExpandedDescendants dump).
+                yield return CloseExpandedChainDeepestFirst(boxId);
             }
             finally
             {
@@ -3158,9 +3219,44 @@ namespace ThreeOS
             }
         }
 
-        private bool EnsureBoxChildren(ulong boxId, string boxName, out List<ulong> childIds)
+        /// <summary>
+        /// Folder relative path for a box (e.g. <c>Parent/Nested</c>), walked via parent links.
+        /// Nested opens used to pass only <see cref="InteropWorkspaceItem.name"/> and looked in
+        /// the wrong directory, so children never spawned.
+        /// </summary>
+        private string ResolveBoxRelativePath(ulong boxId)
         {
-            CollectBoxFolderEntries(boxName, out var files, out var dirs);
+            var parts = new List<string>();
+            var guard = 0;
+            var id = boxId;
+            while (id != 0 && guard++ < 64)
+            {
+                if (!TryFindItem(id, out var item))
+                {
+                    break;
+                }
+
+                parts.Add(item.Name);
+                if (!_bridge.TryGetParentBox(id, out var parent) || parent == 0)
+                {
+                    break;
+                }
+
+                id = parent;
+            }
+
+            parts.Reverse();
+            return parts.Count > 0 ? string.Join("/", parts) : string.Empty;
+        }
+
+        private bool EnsureBoxChildren(ulong boxId, string boxRelPath, out List<ulong> childIds)
+        {
+            if (string.IsNullOrEmpty(boxRelPath))
+            {
+                boxRelPath = ResolveBoxRelativePath(boxId);
+            }
+
+            CollectBoxFolderEntries(boxRelPath, out var files, out var dirs);
 
             // Reuse existing workspace children under this box (inserts + prior expands).
             var existingByName = new Dictionary<string, ulong>(System.StringComparer.OrdinalIgnoreCase);
@@ -3179,7 +3275,7 @@ namespace ThreeOS
                     continue;
                 }
 
-                var rel = $"{boxName}/{name}";
+                var rel = $"{boxRelPath}/{name}";
                 if (!_bridge.StorageAddObject(name, rel, out var id) ||
                     !_bridge.StorageSetParentBox(id, boxId) ||
                     !_bridge.StorageSetInField(id, false))
@@ -3196,7 +3292,7 @@ namespace ThreeOS
                     continue;
                 }
 
-                var rel = $"{boxName}/{name}";
+                var rel = $"{boxRelPath}/{name}";
                 uint nestedCount = 0;
                 foreach (var root in CandidateDemoRoots())
                 {
@@ -3205,8 +3301,10 @@ namespace ThreeOS
                         continue;
                     }
 
-                    var nestedPath = Path.Combine(root, boxName, name);
+                    var nestedPath = Path.Combine(root, boxRelPath.Replace('/', Path.DirectorySeparatorChar), name);
                     var c = ThreeOSAndroidStorage.CountFilesInDirectory(nestedPath);
+                    // Nested boxes often contain only folders — count dirs too.
+                    c += (uint)ThreeOSAndroidStorage.ListDirectoryNames(nestedPath).Count;
                     if (c > nestedCount)
                     {
                         nestedCount = c;
@@ -3224,6 +3322,251 @@ namespace ThreeOS
 
             childIds = CollectChildIds(boxId);
             return true;
+        }
+
+        /// <summary>
+        /// Close <paramref name="rootBoxId"/> and every expanded descendant, deepest first,
+        /// each with the full shrink-to-X animation.
+        /// </summary>
+        private IEnumerator CloseExpandedChainDeepestFirst(ulong rootBoxId)
+        {
+            var chain = new List<ulong>();
+            foreach (var id in _expandedBoxes.Keys)
+            {
+                if (id == rootBoxId || IsBoxUnderAncestor(id, rootBoxId))
+                {
+                    chain.Add(id);
+                }
+            }
+
+            chain.Sort((a, b) =>
+            {
+                var da = BoxDepth(a);
+                var db = BoxDepth(b);
+                var cmp = db.CompareTo(da);
+                return cmp != 0 ? cmp : b.CompareTo(a);
+            });
+
+            foreach (var id in chain)
+            {
+                if (_expandedBoxes.ContainsKey(id))
+                {
+                    yield return AnimateCollapseOneExpandedBox(id);
+                }
+            }
+        }
+
+        /// <summary>
+        /// One expanded box: cluster-shrink children into the X, hide, collapse kernel.
+        /// Does not recurse — caller orders deepest-first.
+        /// </summary>
+        private IEnumerator AnimateCollapseOneExpandedBox(ulong boxId)
+        {
+            if (!_expandedBoxes.TryGetValue(boxId, out var ui))
+            {
+                yield break;
+            }
+
+            var childIds = new List<ulong>(ui.ChildIds);
+            Vector3 centroid = Vector3.zero;
+            var n = 0;
+            foreach (var childId in childIds)
+            {
+                if (_views.TryGetValue(childId, out var childView) && childView.Root != null &&
+                    childView.Root.activeInHierarchy)
+                {
+                    centroid += childView.Root.transform.position;
+                    n++;
+                }
+            }
+
+            Vector3 xPos;
+            if (_views.TryGetValue(boxId, out var boxView) && boxView.Root != null)
+            {
+                xPos = boxView.Root.transform.position + boxView.Root.transform.up * BoxDismissXOffsetM;
+            }
+            else
+            {
+                xPos = ui.XRoot != null ? ui.XRoot.transform.position : centroid;
+            }
+
+            if (n > 0)
+            {
+                centroid /= n;
+            }
+            else
+            {
+                centroid = xPos;
+            }
+
+            foreach (var childId in childIds)
+            {
+                _animLockedIds.Add(childId);
+            }
+
+            const float endScale = 0.001f;
+            var animNode = new GameObject($"3OS_CollapseAnim_{boxId}");
+            animNode.transform.SetPositionAndRotation(centroid, Quaternion.identity);
+            animNode.transform.localScale = Vector3.one;
+            foreach (var childId in childIds)
+            {
+                if (_views.TryGetValue(childId, out var childView) && childView.Root != null)
+                {
+                    childView.Root.transform.SetParent(animNode.transform, true);
+                    childView.Root.transform.localScale = Vector3.one;
+                }
+            }
+
+            var duration = Mathf.Max(0.05f, BoxExpandAnimSeconds);
+            var elapsed = 0f;
+            while (elapsed < duration)
+            {
+                elapsed += Time.unscaledDeltaTime;
+                var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(elapsed / duration));
+                animNode.transform.position = Vector3.Lerp(centroid, xPos, u);
+                animNode.transform.localScale = Vector3.one * Mathf.Lerp(1f, endScale, u);
+                yield return null;
+            }
+
+            foreach (var childId in childIds)
+            {
+                if (_views.TryGetValue(childId, out var childView) && childView.Root != null)
+                {
+                    childView.Root.transform.SetParent(null, true);
+                    childView.Root.transform.localScale = Vector3.one;
+                    childView.Root.SetActive(false);
+                }
+
+                _animLockedIds.Remove(childId);
+            }
+
+            Destroy(animNode);
+            if (ui.XRoot != null)
+            {
+                Destroy(ui.XRoot);
+            }
+
+            _expandedBoxes.Remove(boxId);
+            if (_xHoverBoxId == boxId)
+            {
+                _xHoverBoxId = 0;
+            }
+
+            if (!_bridge.CollapseBox(boxId))
+            {
+                _status = $"collapse failed: {_bridge.LastError}";
+            }
+            else
+            {
+                _bridge.SetBoxOpen(boxId, false);
+                _status = "box closed";
+            }
+        }
+
+        /// <summary>
+        /// Instantly tear down expanded UI for boxes under <paramref name="ancestorBoxId"/>
+        /// (not the ancestor itself). Used by rebuild/insert paths, not animated close.
+        /// </summary>
+        private void TeardownExpandedDescendants(ulong ancestorBoxId, bool collapseKernel)
+        {
+            var toClose = new List<ulong>();
+            foreach (var id in _expandedBoxes.Keys)
+            {
+                if (id != ancestorBoxId && IsBoxUnderAncestor(id, ancestorBoxId))
+                {
+                    toClose.Add(id);
+                }
+            }
+
+            // Deepest first so nested X buttons go before their parents.
+            toClose.Sort((a, b) =>
+            {
+                var da = BoxDepth(a);
+                var db = BoxDepth(b);
+                return db.CompareTo(da);
+            });
+
+            foreach (var id in toClose)
+            {
+                ForceTeardownExpandedBox(id, collapseKernel);
+            }
+        }
+
+        private bool IsBoxUnderAncestor(ulong boxId, ulong ancestorBoxId)
+        {
+            var guard = 0;
+            var id = boxId;
+            while (id != 0 && guard++ < 64)
+            {
+                if (!_bridge.TryGetParentBox(id, out var parent) || parent == 0)
+                {
+                    return false;
+                }
+
+                if (parent == ancestorBoxId)
+                {
+                    return true;
+                }
+
+                id = parent;
+            }
+
+            return false;
+        }
+
+        private int BoxDepth(ulong boxId)
+        {
+            var depth = 0;
+            var id = boxId;
+            while (id != 0 && depth < 64)
+            {
+                if (!_bridge.TryGetParentBox(id, out var parent) || parent == 0)
+                {
+                    break;
+                }
+
+                depth++;
+                id = parent;
+            }
+
+            return depth;
+        }
+
+        private void ForceTeardownExpandedBox(ulong boxId, bool collapseKernel)
+        {
+            if (!_expandedBoxes.TryGetValue(boxId, out var ui))
+            {
+                return;
+            }
+
+            foreach (var childId in ui.ChildIds)
+            {
+                if (_views.TryGetValue(childId, out var childView) && childView.Root != null)
+                {
+                    childView.Root.transform.SetParent(null, true);
+                    childView.Root.transform.localScale = Vector3.one;
+                    childView.Root.SetActive(false);
+                }
+
+                _animLockedIds.Remove(childId);
+            }
+
+            if (ui.XRoot != null)
+            {
+                Destroy(ui.XRoot);
+            }
+
+            _expandedBoxes.Remove(boxId);
+            if (_xHoverBoxId == boxId)
+            {
+                _xHoverBoxId = 0;
+            }
+
+            if (collapseKernel)
+            {
+                _bridge.CollapseBox(boxId);
+                _bridge.SetBoxOpen(boxId, false);
+            }
         }
 
         private List<ulong> CollectChildIds(ulong boxId)
@@ -3246,18 +3589,20 @@ namespace ThreeOS
             return childIds;
         }
 
-        private void CollectBoxFolderEntries(string boxName, out List<string> files, out List<string> dirs)
+        private void CollectBoxFolderEntries(string boxRelPath, out List<string> files, out List<string> dirs)
         {
             var fileSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
             var dirSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            var rel = (boxRelPath ?? string.Empty).Replace('/', Path.DirectorySeparatorChar)
+                .Replace('\\', Path.DirectorySeparatorChar);
             foreach (var root in CandidateDemoRoots())
             {
-                if (string.IsNullOrEmpty(root))
+                if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(rel))
                 {
                     continue;
                 }
 
-                var folder = Path.Combine(root, boxName);
+                var folder = Path.Combine(root, rel);
                 if (!Directory.Exists(folder) && !ThreeOSAndroidStorage.Exists(folder))
                 {
                     continue;

@@ -7,6 +7,7 @@ namespace ThreeOS
     /// grab-anchored stick velocity via kernel, release to coast onto the floor plane.
     /// Stick debug ray endpoints come from the kernel; Unity only draws.
     /// </summary>
+    [DefaultExecutionOrder(200)]
     public sealed class ThreeOSKinematicsController : MonoBehaviour
     {
         public float PossessDistance = 0.45f;
@@ -17,7 +18,6 @@ namespace ThreeOS
         public const float DefaultDeadzoneM = 0.015f;
         public float DeadzoneM = DefaultDeadzoneM;
         public float Friction = 3.5f;
-
         private ThreeOSBridge _bridge;
         private ThreeOSInputRouter _input;
         private ThreeOSTopologyController _topology;
@@ -160,8 +160,9 @@ namespace ThreeOS
 
         private void UpdateStickRay()
         {
-            // Drive from kernel stick_debug (works for StorageController possess too —
-            // do not require this component's local _possessing flag).
+            // Kernel stick_debug (drive-hand latched). Host no longer overrides viz —
+            // a previous host path subtracted camera-forward and pulled the ray toward
+            // the body, and per-frame SetDriveHand reanchors zeroed velocity.
             if (_stickArrow == null || _bridge == null || !_bridge.IsLoaded)
             {
                 HideStickRay();

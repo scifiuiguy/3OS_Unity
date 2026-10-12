@@ -23,7 +23,7 @@ Core 0.0 → … → 0.5 (hands) → 0.6 (voodoo look) → 0.7 → 0.8 → 1.0 �
 | **0.2** | Topology, Half-Dome, double-proxy, portals | Prefab visuals + apply remaps/teleports to scene objects | Dome → lattice → portal drag teleports a cube |
 | **0.3** | Velocity telekinesis + floor clamp | `ThreeOSMovable` applies kernel deltas | Wrist micro-glide + coast; floor holds |
 | **0.4** | Glyph registry, yaw-level cubic matrix, sticky snap-insert + cut, expand/collapse ABI, selection | Dual-root demo dir; glyphs/labels; snap-insert anim; FS cut; select rim; Box expand/X | Level matrix; nested open/close; sticky drop-in **cuts**; select + far possess |
-| **0.5** | Hand/controller input ABI + facade action mapping | XR Hands + controllers → same select/possess semantics | Demo path works hands-only **and** controllers-only |
+| **0.5** | Multi-pinch + palm-mode facade ABI | Meta XR hand/controller geo; XR Hands + trigger/grip/A·X; palm modes | Hands-only + controllers-only; meshes; non-primary or palm chord |
 | **0.6** | Voodoo volume descriptors + ghost/proxy draw contract | Product Half-Dome / lattice / ghost look (not debug cubes) | Dome → lattice reads as intentional voodoo volumes |
 | **0.7** | Layouts, anchors, selection frustum | Mode toggles + frustum viz | Matrix/cluster; multi-select; ego/allo switch |
 | **0.8** | Full enclosure planes + AI command ABI | `UnitySemanticMask` + command hook from host | Wall clip looks right; one voice/command action |
@@ -174,25 +174,34 @@ Documented path: **`/storage/emulated/0/Documents/3OS_Demo`** (Editor: `Document
 
 ### ✋ Phase 0.5: Hand & Controller Integration
 **Pairs with:** Core 0.5  
-**Goal:** Quest tracked hands and Touch controllers drive the **same** hover / select / possess / release semantics through `ThreeOSInputRouter` + the 0.5 input ABI — no Trigger-only special case for the storage demo path.
+**Goal:** Quest tracked hands and Touch controllers drive the **same** semantic actions through `ThreeOSInputRouter` + the 0.5 input ABI — **primary / secondary / ternary** pinches, **palm up / sideways / down** modifiers, and visible hand/controller geometry — no Trigger-only special case.
 
-**Scope note:** 0.1–0.4 already feed frames and use index-trigger heavily for select/drag. 0.5 adds hand-tracking parity, pinch mapping, and soft-fail when either source drops.
+**Scope note:** 0.1–0.4 already feed frames and use index-trigger heavily for select/drag. 0.5 adds hand-tracking parity, multi-pinch + palm mapping, Meta (or equivalent) hand/controller meshes, and soft-fail when either source drops.
 
-- [ ] **Task U5.1: XR Hands + controller sourcing**
-  - [ ] Wire XR Hands (joints / pinch) and OpenXR controllers into `InteropInputFrame` fields from core 0.5.
-  - [ ] Tracking-lost / low-confidence soft-fail (no native crash; possess coasts or clears per kernel rules).
-- [ ] **Task U5.2: Semantic action parity**
-  - [ ] Pinch (hands) ≡ trigger/select (controllers) for selection, Box expand double-tap policy, and commit paths.
-  - [ ] Grip (or documented controller equivalent) ≡ possess / telekinesis start-stop used by storage drag + snap.
-  - [ ] Dual-source policy matches core: prefer confident hands; fall back to controllers without double-fire.
-- [ ] **Task U5.3: Interaction point + cursor**
-  - [ ] Drive hover/snap from pinch tip or controller tip (documented offset so the hand does not occlude the target).
-  - [ ] Optional simple hand/controller cursor viz for debugging the interaction point.
+**Pinch ↔ controller defaults** (see core 0.5): primary = index–thumb / **Trigger**; secondary = middle–thumb / **Grip**; ternary = ring–thumb / **primaryButton (A·X)**. Palm mode modifies which facade action fires.
+
+**Locked bindings:** **Select** = primary press + any palm; **Drag** = primary hold + palm down/sideways; **Voodoo volume** = primary hold + palm up (intent mapped now; full UX in 0.6). **Cursor:** one sphere/hand; `d_thresh = 2.5″`; scale from shortest in-threshold finger pair only. **Gate device:** Quest 2; keep Quest 3–ready OpenXR paths.
+
+- [x] **Task U5.0: Meta XR SDK for hand & controller geometry**
+  - [x] **Need:** Yes for product hand meshes + Touch controller models. Unity **XR Hands** alone covers joints/pinches, not Meta skinned hands / official controller geo.
+  - [x] **What “Core + Interaction” vs “All-in-One” means:** *All-in-One* is Meta’s kitchen-sink UPM/Asset Store bundle (Core, Interaction, Voice, Haptics, MRUK, …). *Core + Interaction* is the lighter pair we actually need for hands/controllers/interaction helpers. **Prefer Core + Interaction** for 0.5; use All-in-One only if resolve is easier and package weight is acceptable.
+  - [x] **Install:** Agent can add Meta scoped registry + `com.meta.xr` package entries to the sample `Packages/manifest.json`; you open Unity once for first fetch. Fallback: Asset Store All-in-One or `.tgz` (manual).
+  - [ ] Wire hand + controller meshes into the Quest sample (open Unity once to resolve Meta packages / Building Blocks); keep 3OS input on OpenXR / XR Hands / Input System (vendor-neutral core).
+- [x] **Task U5.1: XR Hands + controller sourcing**
+  - [x] Wire joints, index/middle/ring–thumb distances + edges, palm normal; controllers trigger / grip / primaryButton + pose → core 0.5 frame.
+  - [x] Quantize palm → `Up` / `Sideways` / `Down` with hysteresis (controllers from device orientation).
+  - [x] Tracking-lost soft-fail; Quest 2 gate + Quest 3–ready profiles where feasible.
+- [x] **Task U5.2: Semantic action parity**
+  - [x] Host binding table = locked defaults (select / drag / voodoo stub); dual-source without double-fire.
+- [x] **Task U5.3: Interaction point + cursor**
+  - [x] One unparented white-sphere cursor per hand; `cursor0` from driving finger pair (shortest `d ≤ 2.5″`, else index–thumb); +4″ floor-forward + 2″ up = hover/select/snap probe (core 5.3).
+- [x] **Task U5.3b: Cursor sphere scale interpolation**
+  - [x] Shortest in-threshold pair drives 100%→50% scale; on that channel’s pinch trigger, fast-lerp to 100% (core 5.3b). Controllers: same via trigger/grip/primaryButton approach.
 - [ ] **Task U5.4: Device smoke**
-  - [ ] Debug HUD shows active input source (Hands / Controllers / Mixed) and last action.
-  - [ ] Same Phase 0.4 storage path completable under each source alone.
+  - [ ] HUD: source, pinch channel, palm mode, facade action (incl. voodoo stub).
+  - [ ] Quest 2: storage path hands-only and controllers-only; white spheres; select vs drag (palm) vs palm-up voodoo stub.
 
-**Quest gate:** On Quest 2, complete select → drag → snap-insert → Box expand/X once with **controllers only** and once with **tracked hands only**.
+**Quest gate (Quest 2; Quest 3–ready code):** Controllers-only and hands-only complete select → drag → snap-insert → Box expand/X; meshes visible; cursors are probes; palm-up primary-hold shows voodoo-volume intent (stub OK).
 
 ---
 

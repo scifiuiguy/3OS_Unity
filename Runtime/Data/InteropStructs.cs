@@ -9,7 +9,7 @@ namespace ThreeOS
     /// </summary>
     public static class InteropStructs
     {
-        public const uint AbiVersion = 4;
+        public const uint AbiVersion = 5;
         public const int InputFrameBytes = 192;
         public const int TransformDeltaBytes = 48;
         public const int DomeStateBytes = 48;
@@ -19,6 +19,9 @@ namespace ThreeOS
         public const int WorkspaceItemBytes = 200;
         public const int SnapStateBytes = 64;
         public const int StorageEventBytes = 344;
+        public const int HandSampleBytes = 128;
+        public const int PointCursorBytes = 32;
+        public const int InteractionIntentsBytes = 16;
 
         public static void AssertLayout()
         {
@@ -31,6 +34,9 @@ namespace ThreeOS
             var workspaceSize = Marshal.SizeOf<InteropWorkspaceItem>();
             var snapSize = Marshal.SizeOf<InteropSnapState>();
             var storageEventSize = Marshal.SizeOf<InteropStorageEvent>();
+            var handSize = Marshal.SizeOf<InteropHandSample>();
+            var cursorSize = Marshal.SizeOf<InteropPointCursor>();
+            var intentsSize = Marshal.SizeOf<InteropInteractionIntents>();
             Debug.Assert(inputSize == InputFrameBytes, $"InteropInputFrame size {inputSize} != {InputFrameBytes}");
             Debug.Assert(deltaSize == TransformDeltaBytes, $"InteropTransformDelta size {deltaSize} != {TransformDeltaBytes}");
             Debug.Assert(domeSize == DomeStateBytes, $"InteropDomeState size {domeSize} != {DomeStateBytes}");
@@ -40,6 +46,9 @@ namespace ThreeOS
             Debug.Assert(workspaceSize == WorkspaceItemBytes, $"InteropWorkspaceItem size {workspaceSize} != {WorkspaceItemBytes}");
             Debug.Assert(snapSize == SnapStateBytes, $"InteropSnapState size {snapSize} != {SnapStateBytes}");
             Debug.Assert(storageEventSize == StorageEventBytes, $"InteropStorageEvent size {storageEventSize} != {StorageEventBytes}");
+            Debug.Assert(handSize == HandSampleBytes, $"InteropHandSample size {handSize} != {HandSampleBytes}");
+            Debug.Assert(cursorSize == PointCursorBytes, $"InteropPointCursor size {cursorSize} != {PointCursorBytes}");
+            Debug.Assert(intentsSize == InteractionIntentsBytes, $"InteropInteractionIntents size {intentsSize} != {InteractionIntentsBytes}");
         }
 
         /// <summary>Unity left-handed Y-up → OpenXR right-handed Y-up.</summary>
@@ -138,6 +147,94 @@ namespace ThreeOS
         LeftGrab = 1 << 2,
         RightGrab = 1 << 3,
         Menu = 1 << 4,
+        LeftTernary = 1 << 5,
+        RightTernary = 1 << 6,
+    }
+
+    [System.Flags]
+    public enum HandTipFlags : uint
+    {
+        None = 0,
+        Thumb = 1 << 0,
+        Index = 1 << 1,
+        Middle = 1 << 2,
+        Ring = 1 << 3,
+        IndexProximal = 1 << 4,
+    }
+
+    public enum PalmMode : uint
+    {
+        Up = 0,
+        Sideways = 1,
+        Down = 2,
+    }
+
+    public enum PinchChannel : uint
+    {
+        None = 0,
+        Primary = 1,
+        Secondary = 2,
+        Ternary = 3,
+    }
+
+    [System.Flags]
+    public enum InteractionIntentFlags : uint
+    {
+        None = 0,
+        SelectPulse = 1 << 0,
+        DragActive = 1 << 1,
+        VoodooHold = 1 << 2,
+        PrimaryHeld = 1 << 3,
+        SecondaryHeld = 1 << 4,
+        TernaryHeld = 1 << 5,
+    }
+
+    /// <summary>128-byte Phase 0.5 hand sample (OpenXR meters).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropHandSample
+    {
+        public uint tracked;
+        public uint tipFlags;
+        public ThreeOSVec3 thumbTip;
+        public ThreeOSVec3 indexTip;
+        public ThreeOSVec3 middleTip;
+        public ThreeOSVec3 ringTip;
+        public ThreeOSVec3 palmNormal;
+        public uint palmMode;
+        public uint palmModeValid;
+        public float primaryValue;
+        public float secondaryValue;
+        public float ternaryValue;
+        public uint primaryPressed;
+        public uint secondaryPressed;
+        public uint ternaryPressed;
+        public ThreeOSVec3 indexProximal;
+        public uint reserved3;
+        public uint reserved4;
+        public uint reserved5;
+        public uint reserved6;
+    }
+
+    /// <summary>32-byte point cursor probe.</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropPointCursor
+    {
+        public uint active;
+        public uint drivingChannel;
+        public float scale;
+        public float drivingDistanceM;
+        public ThreeOSVec3 position;
+        public uint palmMode;
+    }
+
+    /// <summary>16-byte aggregated interaction intents.</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropInteractionIntents
+    {
+        public uint flags;
+        public uint palmMode;
+        public uint activeChannel;
+        public uint handedness;
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 4)]

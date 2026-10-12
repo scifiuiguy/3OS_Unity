@@ -2,7 +2,8 @@
   "name": "ThreeOS.Runtime",
   "rootNamespace": "ThreeOS",
   "references": [
-    "Unity.InputSystem"
+    "Unity.InputSystem",
+    "Unity.XR.Hands"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],
@@ -11,6 +12,12 @@
   "precompiledReferences": [],
   "autoReferenced": true,
   "defineConstraints": [],
-  "versionDefines": [],
+  "versionDefines": [
+    {
+      "name": "com.unity.xr.hands",
+      "expression": "1.0.0",
+      "define": "THREEOS_XR_HANDS"
+    }
+  ],
   "noEngineReferences": false
 }
