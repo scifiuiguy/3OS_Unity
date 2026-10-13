@@ -46,6 +46,8 @@ namespace ThreeOS
         private ThreeOSTopologyController _topology;
 
         private readonly Dictionary<ulong, GlyphView> _views = new Dictionary<ulong, GlyphView>();
+        /// <summary>Task 6.4 near-portal ghosts (labels + Fresnel); key = portalId&lt;&lt;32 | entityId low bits + parent flag.</summary>
+        private readonly Dictionary<ulong, GlyphView> _ghostViews = new Dictionary<ulong, GlyphView>();
         private readonly Dictionary<ulong, ExpandedBoxUi> _expandedBoxes = new Dictionary<ulong, ExpandedBoxUi>();
         private readonly HashSet<ulong> _animLockedIds = new HashSet<ulong>();
         private ThreeOSArrowVisual _insertArrow;
@@ -98,6 +100,7 @@ namespace ThreeOS
 
         private sealed class GlyphView
         {
+            public ulong EntityId;
             public GameObject Root;
             public ThreeOSMovable Movable;
             public MeshRenderer Renderer;
@@ -366,6 +369,7 @@ namespace ThreeOS
             }
 
             SyncViewsFromKernel();
+            SyncGhostViewsFromKernel();
             // X hover before trigger so left-hand press can close on the same frame.
             UpdateExpandedDismissAffordances();
             HandleTriggerSelectAndDrag();
@@ -384,7 +388,13 @@ namespace ThreeOS
             }
 
             var camPos = cam.transform.position;
-            foreach (var kv in _views)
+            BillboardLabelSet(_views, camPos);
+            BillboardLabelSet(_ghostViews, camPos);
+        }
+
+        private static void BillboardLabelSet(Dictionary<ulong, GlyphView> set, Vector3 camPos)
+        {
+            foreach (var kv in set)
             {
                 var view = kv.Value;
                 if (view.Root == null || !view.Root.activeInHierarchy)
@@ -1156,6 +1166,7 @@ namespace ThreeOS
             }
 
             _views.Clear();
+            ClearGhostViews();
             var count = _bridge.StorageItemCount();
             for (uint i = 0; i < count; i++)
             {
@@ -1216,6 +1227,7 @@ namespace ThreeOS
 
             return new GlyphView
             {
+                EntityId = item.entityId,
                 Root = go,
                 Movable = movable,
                 Renderer = mr,
@@ -1227,6 +1239,147 @@ namespace ThreeOS
                 OwnsMaterial = ownsMaterial
             };
         }
+
+        private void SyncGhostViewsFromKernel()
+        {
+            if (_bridge == null || !_bridge.IsLoaded || _bridge.NativeAbiVersion < 6)
+            {
+                ClearGhostViews();
+                return;
+            }
+
+            var live = new HashSet<ulong>();
+            var portals = _bridge.VoodooPortalCount;
+            for (uint pi = 0; pi < portals; pi++)
+            {
+                if (!_bridge.TryGetVoodooPortal(pi, out var portal))
+                {
+                    continue;
+                }
+
+                var gc = _bridge.VoodooPortalGhostCount(portal.id);
+                for (uint gi = 0; gi < gc; gi++)
+                {
+                    if (!_bridge.TryGetVoodooPortalGhost(portal.id, gi, out var ghost))
+                    {
+                        continue;
+                    }
+
+                    if (!TryFindItem(ghost.entityId, out var item))
+                    {
+                        continue;
+                    }
+
+                    var key = GhostViewKey(portal.id, ghost.entityId, ghost.isParentBox != 0);
+                    live.Add(key);
+                    if (!_ghostViews.TryGetValue(key, out var view) || view.Root == null)
+                    {
+                        view = CreateGhostView(item, ghost);
+                        _ghostViews[key] = view;
+                    }
+                    else
+                    {
+                        var pose = InteropStructs.ToUnityPose(ghost.nearPose);
+                        view.Root.transform.SetPositionAndRotation(pose.position, pose.rotation);
+                        var s = Mathf.Max(0.15f, ghost.scale);
+                        view.Root.transform.localScale = Vector3.one * s;
+                        if (view.NameLabel != null)
+                        {
+                            view.NameLabel.text = item.Name ?? string.Empty;
+                        }
+
+                        if (view.SecondaryLabel != null)
+                        {
+                            view.SecondaryLabel.text = item.SecondaryLabel ?? string.Empty;
+                        }
+                    }
+                }
+            }
+
+            var dead = new List<ulong>();
+            foreach (var kv in _ghostViews)
+            {
+                if (!live.Contains(kv.Key))
+                {
+                    dead.Add(kv.Key);
+                }
+            }
+
+            foreach (var id in dead)
+            {
+                DestroyGlyphView(_ghostViews[id]);
+                _ghostViews.Remove(id);
+            }
+        }
+
+        private GlyphView CreateGhostView(InteropWorkspaceItem item, InteropVoodooGhost ghost)
+        {
+            var go = new GameObject($"Ghost_{item.Name}");
+            var visual = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            visual.name = "Visual";
+            visual.transform.SetParent(go.transform, false);
+            visual.transform.localPosition = Vector3.zero;
+            visual.transform.localRotation = Quaternion.identity;
+            visual.transform.localScale = GlyphVisualScale(item.GlyphId);
+            var col = visual.GetComponent<BoxCollider>();
+            if (col != null)
+            {
+                Destroy(col); // select uses kernel poses, not physics
+            }
+
+            var mr = visual.GetComponent<MeshRenderer>();
+            ResolveGlyphMaterial(item, out var mat, out var ownsMaterial);
+            // Ghosts need their own MPB-friendly material instance for Fresnel.
+            if (!ownsMaterial && mat != null)
+            {
+                mat = new Material(mat);
+                ownsMaterial = true;
+            }
+
+            mr.sharedMaterial = mat;
+            mr.allowOcclusionWhenDynamic = false;
+            ApplyGlyphSelection(mr, rimOn: false, GlyphBaseColor(item), null, ownsMaterial ? mat : null);
+
+            var pose = InteropStructs.ToUnityPose(ghost.nearPose);
+            go.transform.SetPositionAndRotation(pose.position, pose.rotation);
+            go.transform.localScale = Vector3.one * Mathf.Max(0.15f, ghost.scale);
+
+            var labelY = -(GlyphSizeM * 0.5f + 0.025f);
+            var nameLabel = CreateLabel(go.transform, item.Name, new Vector3(0f, labelY, 0f), 0.0072f);
+            TextMesh secondary = null;
+            if (item.kind == 1)
+            {
+                secondary = CreateLabel(go.transform, item.SecondaryLabel,
+                    new Vector3(0f, labelY - 0.028f, 0f), 0.0054f);
+            }
+
+            return new GlyphView
+            {
+                EntityId = item.entityId,
+                Root = go,
+                Movable = null,
+                Renderer = mr,
+                Collider = null,
+                NameLabel = nameLabel,
+                SecondaryLabel = secondary,
+                GlyphId = item.GlyphId,
+                Material = mat,
+                OwnsMaterial = ownsMaterial
+            };
+        }
+
+        private void ClearGhostViews()
+        {
+            foreach (var kv in _ghostViews)
+            {
+                DestroyGlyphView(kv.Value);
+            }
+
+            _ghostViews.Clear();
+        }
+
+        private static ulong GhostViewKey(ulong portalId, ulong entityId, bool parentBox) =>
+            (portalId * 1000003UL) ^ (entityId * 97UL) ^ (parentBox ? 1UL : 0UL);
 
         private static Vector3 GlyphVisualScale(string glyphId)
         {
@@ -2033,6 +2186,39 @@ namespace ThreeOS
                 bestId = kv.Key;
             }
 
+            // Task 6.4: select ghosts → same far entity id (no drag yet).
+            if (_bridge != null && _bridge.IsLoaded)
+            {
+                var portals = _bridge.VoodooPortalCount;
+                for (uint pi = 0; pi < portals; pi++)
+                {
+                    if (!_bridge.TryGetVoodooPortal(pi, out var portal))
+                    {
+                        continue;
+                    }
+
+                    var gc = _bridge.VoodooPortalGhostCount(portal.id);
+                    for (uint gi = 0; gi < gc; gi++)
+                    {
+                        if (!_bridge.TryGetVoodooPortalGhost(portal.id, gi, out var ghost))
+                        {
+                            continue;
+                        }
+
+                        var center = InteropStructs.ToUnityPose(ghost.nearPose).position;
+                        var gHalf = half * Mathf.Max(0.15f, ghost.scale);
+                        if (!RayHitsYawAlignedAabb(rayOrigin, rayDir, center, yaw, gHalf, out var t) ||
+                            t < 0f || t >= bestT)
+                        {
+                            continue;
+                        }
+
+                        bestT = t;
+                        bestId = ghost.entityId;
+                    }
+                }
+            }
+
             if (bestId == 0)
             {
                 return false;
@@ -2126,28 +2312,37 @@ namespace ThreeOS
 
             foreach (var kv in _views)
             {
-                var view = kv.Value;
-                if (view.Renderer == null)
-                {
-                    continue;
-                }
-
-                // ABI selection (kernel) vs rim-on (shader). Blue X-hover is not selected.
-                var abiSelected = selectedId != 0 && kv.Key == selectedId;
-                var blueHover = blueChildren != null && blueChildren.Contains(kv.Key);
-                var rimOn = abiSelected || blueHover;
-                var owned = view.OwnsMaterial ? view.Material : null;
-                if (!TryFindItem(kv.Key, out var item))
-                {
-                    ApplyGlyphSelection(view.Renderer, rimOn, Color.white,
-                        blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
-                    continue;
-                }
-
-                // Identical rim path to white select; only _GlowColor becomes blue.
-                ApplyGlyphSelection(view.Renderer, rimOn, GlyphBaseColor(item),
-                    blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
+                ApplySelectionRim(kv.Key, kv.Value, selectedId, blueChildren);
             }
+
+            // Ghosts share the far entity id for Fresnel — both glow when selected.
+            foreach (var kv in _ghostViews)
+            {
+                ApplySelectionRim(kv.Value.EntityId, kv.Value, selectedId, blueChildren);
+            }
+        }
+
+        private void ApplySelectionRim(ulong entityId, GlyphView view, ulong selectedId,
+            HashSet<ulong> blueChildren)
+        {
+            if (view.Renderer == null)
+            {
+                return;
+            }
+
+            var abiSelected = selectedId != 0 && entityId == selectedId;
+            var blueHover = blueChildren != null && blueChildren.Contains(entityId);
+            var rimOn = abiSelected || blueHover;
+            var owned = view.OwnsMaterial ? view.Material : null;
+            if (!TryFindItem(entityId, out var item))
+            {
+                ApplyGlyphSelection(view.Renderer, rimOn, Color.white,
+                    blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
+                return;
+            }
+
+            ApplyGlyphSelection(view.Renderer, rimOn, GlyphBaseColor(item),
+                blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
         }
 
         private bool TryFindItem(ulong id, out InteropWorkspaceItem item)

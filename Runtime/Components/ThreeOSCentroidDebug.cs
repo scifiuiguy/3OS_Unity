@@ -13,12 +13,15 @@ namespace ThreeOS
         private readonly List<Transform> _markers = new List<Transform>();
         private Material _matGod;
         private Material _matBox;
+        private Material _matTemp;
 
         private void Awake()
         {
             _bridge = GetComponent<ThreeOSBridge>() ?? FindFirstObjectByType<ThreeOSBridge>();
             _matGod = MakeMat(new Color(1f, 0.35f, 0.9f, 0.55f));
             _matBox = MakeMat(new Color(0.35f, 0.85f, 1f, 0.55f));
+            // Near-portal parent node (center-bottom-center of near BB).
+            _matTemp = MakeMat(new Color(0.35f, 0.85f, 1f, 0.75f));
         }
 
         private void LateUpdate()
@@ -52,7 +55,18 @@ namespace ThreeOS
                 var r = t.GetComponent<MeshRenderer>();
                 if (r != null)
                 {
-                    r.sharedMaterial = c.kind == (uint)CentroidKind.God ? _matGod : _matBox;
+                    if (c.kind == (uint)CentroidKind.God)
+                    {
+                        r.sharedMaterial = _matGod;
+                    }
+                    else if (c.kind == (uint)CentroidKind.Temporary)
+                    {
+                        r.sharedMaterial = _matTemp;
+                    }
+                    else
+                    {
+                        r.sharedMaterial = _matBox;
+                    }
                 }
 
                 t.gameObject.SetActive(true);
@@ -68,6 +82,7 @@ namespace ThreeOS
         {
             if (_matGod != null) Destroy(_matGod);
             if (_matBox != null) Destroy(_matBox);
+            if (_matTemp != null) Destroy(_matTemp);
         }
 
         private void EnsureCount(int n)

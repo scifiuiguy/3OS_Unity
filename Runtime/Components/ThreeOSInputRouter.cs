@@ -23,8 +23,13 @@ namespace ThreeOS
         private ThreeOSBridge _bridge;
         private ThreeOSStorageController _storage;
         private Transform _headTransform;
+        private static readonly Color CursorWhite = Color.white;
+        private static readonly Color CursorNearBlue = new Color(0.4f, 0.85f, 1f, 1f);
+
         private Transform _leftCursor;
         private Transform _rightCursor;
+        private Material _leftCursorMat;
+        private Material _rightCursorMat;
         private ulong _frameIndex;
 
 #if THREEOS_XR_HANDS
@@ -82,8 +87,8 @@ namespace ThreeOS
                 _headTransform = Camera.main.transform;
             }
 
-            _leftCursor = CreateSphere("3OS_LeftCursor", CursorBaseDiameterM, Color.white).transform;
-            _rightCursor = CreateSphere("3OS_RightCursor", CursorBaseDiameterM, Color.white).transform;
+            _leftCursor = CreateSphere("3OS_LeftCursor", CursorBaseDiameterM, CursorWhite, out _leftCursorMat).transform;
+            _rightCursor = CreateSphere("3OS_RightCursor", CursorBaseDiameterM, CursorWhite, out _rightCursorMat).transform;
 
             if (GetComponent<ThreeOSHandVisuals>() == null)
             {
@@ -198,8 +203,8 @@ namespace ThreeOS
                 }
             }
 
-            UpdateCursorVisual(_leftCursor, LastLeftCursor);
-            UpdateCursorVisual(_rightCursor, LastRightCursor);
+            UpdateCursorVisual(_leftCursor, _leftCursorMat, LastLeftCursor);
+            UpdateCursorVisual(_rightCursor, _rightCursorMat, LastRightCursor);
         }
 
         private static void MuteHandSample(ref InteropHandSample hand)
@@ -426,7 +431,7 @@ namespace ThreeOS
             return frame.head;
         }
 
-        private static void UpdateCursorVisual(Transform tip, InteropPointCursor cursor)
+        private void UpdateCursorVisual(Transform tip, Material mat, InteropPointCursor cursor)
         {
             if (tip == null)
             {
@@ -439,10 +444,20 @@ namespace ThreeOS
                 return;
             }
 
-            var unity = InteropStructs.OpenXrToUnityPosition(cursor.position.ToVector3());
+            var openXr = cursor.position.ToVector3();
+            var unity = InteropStructs.OpenXrToUnityPosition(openXr);
             tip.position = unity;
             var s = CursorBaseDiameterM * Mathf.Max(0.1f, cursor.scale);
             tip.localScale = Vector3.one * s;
+            if (mat != null && _bridge != null && _bridge.IsLoaded)
+            {
+                var inside = _bridge.PointInAnyNearBb(openXr);
+                var c = inside ? CursorNearBlue : CursorWhite;
+                mat.color = c;
+                if (mat.HasProperty("_Color")) mat.SetColor("_Color", c);
+                if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", c);
+            }
+
             SetActive(tip, true);
         }
 
@@ -462,7 +477,7 @@ namespace ThreeOS
             }
         }
 
-        private static GameObject CreateSphere(string name, float diameter, Color color)
+        private static GameObject CreateSphere(string name, float diameter, Color color, out Material mat)
         {
             var go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             go.name = name;
@@ -473,7 +488,7 @@ namespace ThreeOS
                 Destroy(col);
             }
 
-            var mat = new Material(Shader.Find("Unlit/Color") ?? Shader.Find("Sprites/Default"));
+            mat = new Material(Shader.Find("Unlit/Color") ?? Shader.Find("Sprites/Default"));
             if (mat.HasProperty("_Color"))
             {
                 mat.SetColor("_Color", color);

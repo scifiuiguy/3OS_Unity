@@ -28,6 +28,8 @@ namespace ThreeOS
         public const int VoodooDragArrowBytes = 64;
         public const int CentroidBytes = 64;
         public const int VoodooSnapNodeBytes = 48;
+        public const int VoodooPortalBytes = 200;
+        public const int VoodooGhostBytes = 88;
 
         public static void AssertLayout()
         {
@@ -49,6 +51,8 @@ namespace ThreeOS
             var voodooArrowSize = Marshal.SizeOf<InteropVoodooDragArrow>();
             var centroidSize = Marshal.SizeOf<InteropCentroid>();
             var voodooSnapNodeSize = Marshal.SizeOf<InteropVoodooSnapNode>();
+            var voodooPortalSize = Marshal.SizeOf<InteropVoodooPortal>();
+            var voodooGhostSize = Marshal.SizeOf<InteropVoodooGhost>();
             Debug.Assert(inputSize == InputFrameBytes, $"InteropInputFrame size {inputSize} != {InputFrameBytes}");
             Debug.Assert(deltaSize == TransformDeltaBytes, $"InteropTransformDelta size {deltaSize} != {TransformDeltaBytes}");
             Debug.Assert(domeSize == DomeStateBytes, $"InteropDomeState size {domeSize} != {DomeStateBytes}");
@@ -67,6 +71,8 @@ namespace ThreeOS
             Debug.Assert(voodooArrowSize == VoodooDragArrowBytes, $"InteropVoodooDragArrow size {voodooArrowSize} != {VoodooDragArrowBytes}");
             Debug.Assert(centroidSize == CentroidBytes, $"InteropCentroid size {centroidSize} != {CentroidBytes}");
             Debug.Assert(voodooSnapNodeSize == VoodooSnapNodeBytes, $"InteropVoodooSnapNode size {voodooSnapNodeSize} != {VoodooSnapNodeBytes}");
+            Debug.Assert(voodooPortalSize == VoodooPortalBytes, $"InteropVoodooPortal size {voodooPortalSize} != {VoodooPortalBytes}");
+            Debug.Assert(voodooGhostSize == VoodooGhostBytes, $"InteropVoodooGhost size {voodooGhostSize} != {VoodooGhostBytes}");
         }
 
         /// <summary>Unity left-handed Y-up → OpenXR right-handed Y-up.</summary>
@@ -279,6 +285,7 @@ namespace ThreeOS
         None = 0,
         God = 1,
         Box = 2,
+        Temporary = 3,
     }
 
     /// <summary>CharSet.Ansi + ByValTStr matches native char[16] (IL2CPP-safe).</summary>
@@ -308,6 +315,36 @@ namespace ThreeOS
         public float radiusM;
         public ThreeOSVec3 fieldPosition;
         public float unused0;
+    }
+
+    /// <summary>Task 6.4 parked far+near portal (200 bytes).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropVoodooPortal
+    {
+        public ulong id;
+        public uint mode;
+        public uint creatingHand;
+        public InteropVoodooBoundingBox farBb;
+        public InteropVoodooBoundingBox nearBb;
+        public ulong persistentCentroidId;
+        public ulong temporaryCentroidId;
+        public uint ghostCount;
+        public uint reserved0;
+    }
+
+    /// <summary>Task 6.4 near-portal ghost (88 bytes).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropVoodooGhost
+    {
+        public ulong entityId;
+        public uint isParentBox;
+        public uint reserved0;
+        public ThreeOSPose farPose;
+        public ThreeOSPose nearPose;
+        public float scale;
+        public float unused0;
+        public float unused1;
+        public float unused2;
     }
 
     /// <summary>128-byte Phase 0.5 hand sample (OpenXR meters).</summary>

@@ -10,8 +10,8 @@ namespace ThreeOS
     public sealed class ThreeOSVoodooController : MonoBehaviour
     {
         private const float DeadzoneM = 0.015f;
-        private static readonly Color FarWire = new Color(1f, 0.85f, 0.2f, 0.95f);
-        private static readonly Color NearWire = new Color(0.4f, 0.85f, 1f, 0.95f);
+        private static readonly Color FarWire = new Color(1f, 0.85f, 0.2f, 0.5f);
+        private static readonly Color NearWire = new Color(0.4f, 0.85f, 1f, 0.5f);
         private static readonly Color SnapIdle = new Color(1f, 0.92f, 0.35f, 0.75f);
         private static readonly Color SnapLocked = new Color(1f, 0.55f, 0.1f, 0.95f);
 
@@ -19,6 +19,10 @@ namespace ThreeOS
         private readonly HandViz[] _hands = new HandViz[2];
         private Material _matSnapIdle;
         private Material _matSnapLocked;
+        private readonly List<Transform> _portalFar = new List<Transform>();
+        private readonly List<LineRenderer> _portalFarLr = new List<LineRenderer>();
+        private readonly List<Transform> _portalNear = new List<Transform>();
+        private readonly List<LineRenderer> _portalNearLr = new List<LineRenderer>();
 
         private sealed class HandViz
         {
@@ -67,6 +71,8 @@ namespace ThreeOS
             {
                 UpdateHand(h);
             }
+
+            UpdatePortals();
         }
 
         private bool UpdateHand(uint hand)
@@ -93,11 +99,61 @@ namespace ThreeOS
                 viz.LoggedOpen = true;
             }
 
-            UpdateWireBox(viz.FarRoot, viz.FarLines, session.farBb);
-            UpdateWireBox(viz.NearRoot, viz.NearLines, session.nearBb);
+            // Dragging: show live far BB. Parked portals are drawn from portal list.
+            var dragging = session.nearBb.open == 0;
+            if (dragging)
+            {
+                UpdateWireBox(viz.FarRoot, viz.FarLines, session.farBb);
+            }
+            else if (viz.FarRoot != null)
+            {
+                viz.FarRoot.gameObject.SetActive(false);
+            }
+
+            if (viz.NearRoot != null)
+            {
+                viz.NearRoot.gameObject.SetActive(false);
+            }
+
             UpdateYellowArrow(hand, viz);
-            UpdateSnapDots(hand, viz, session.mode == (uint)VoodooMode.Snap);
+            UpdateSnapDots(hand, viz, session.mode == (uint)VoodooMode.Snap && dragging);
             return true;
+        }
+
+        private void UpdatePortals()
+        {
+            var n = (int)_bridge.VoodooPortalCount;
+            EnsurePortalWireCount(n);
+            for (var i = 0; i < n; i++)
+            {
+                if (!_bridge.TryGetVoodooPortal((uint)i, out var portal))
+                {
+                    _portalFar[i].gameObject.SetActive(false);
+                    _portalNear[i].gameObject.SetActive(false);
+                    continue;
+                }
+
+                UpdateWireBox(_portalFar[i], _portalFarLr[i], portal.farBb);
+                UpdateWireBox(_portalNear[i], _portalNearLr[i], portal.nearBb);
+            }
+
+            for (var i = n; i < _portalFar.Count; i++)
+            {
+                _portalFar[i].gameObject.SetActive(false);
+                _portalNear[i].gameObject.SetActive(false);
+            }
+        }
+
+        private void EnsurePortalWireCount(int n)
+        {
+            while (_portalFar.Count < n)
+            {
+                var i = _portalFar.Count;
+                _portalFar.Add(CreateWireBox($"3OS_VoodooPortalFar_{i}", FarWire, out var farLr));
+                _portalFarLr.Add(farLr);
+                _portalNear.Add(CreateWireBox($"3OS_VoodooPortalNear_{i}", NearWire, out var nearLr));
+                _portalNearLr.Add(nearLr);
+            }
         }
 
         private void UpdateSnapDots(uint hand, HandViz viz, bool snapMode)
@@ -217,6 +273,16 @@ namespace ThreeOS
             {
                 HideHand(_hands[h]);
             }
+
+            foreach (var t in _portalFar)
+            {
+                if (t != null) t.gameObject.SetActive(false);
+            }
+
+            foreach (var t in _portalNear)
+            {
+                if (t != null) t.gameObject.SetActive(false);
+            }
         }
 
         private static void HideHand(HandViz viz)
@@ -295,9 +361,10 @@ namespace ThreeOS
 
         private static Material CreateLineMaterial(Color c)
         {
-            var shader = Shader.Find("Universal Render Pipeline/Unlit") ??
-                         Shader.Find("Unlit/Color") ??
-                         Shader.Find("Sprites/Default");
+            // Prefer Sprites/Default so LineRenderer alpha is respected on Quest/URP.
+            var shader = Shader.Find("Sprites/Default") ??
+                         Shader.Find("Universal Render Pipeline/Unlit") ??
+                         Shader.Find("Unlit/Color");
             var mat = new Material(shader);
             mat.color = c;
             if (mat.HasProperty("_BaseColor"))

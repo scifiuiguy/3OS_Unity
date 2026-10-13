@@ -274,6 +274,34 @@ namespace ThreeOS
         private static extern int threeos_voodoo_get_snap_node(uint hand, uint index,
             out InteropVoodooSnapNode outNode);
 
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_voodoo_portal();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_voodoo_ghost();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_voodoo_portal_count();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_get_portal(uint index, out InteropVoodooPortal outPortal);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_voodoo_portal_ghost_count(ulong portalId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_get_portal_ghost(ulong portalId, uint index,
+            out InteropVoodooGhost outGhost);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_dismiss_portal(ulong portalId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_voodoo_creation_allowed();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_voodoo_point_in_near_bb(float x, float y, float z);
+
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
         public uint NativeVersion { get; private set; }
@@ -354,9 +382,11 @@ namespace ThreeOS
                         threeos_sizeof_voodoo_session() != InteropStructs.VoodooSessionBytes ||
                         threeos_sizeof_voodoo_drag_arrow() != InteropStructs.VoodooDragArrowBytes ||
                         threeos_sizeof_centroid() != InteropStructs.CentroidBytes ||
-                        threeos_sizeof_voodoo_snap_node() != InteropStructs.VoodooSnapNodeBytes)
+                        threeos_sizeof_voodoo_snap_node() != InteropStructs.VoodooSnapNodeBytes ||
+                        threeos_sizeof_voodoo_portal() != InteropStructs.VoodooPortalBytes ||
+                        threeos_sizeof_voodoo_ghost() != InteropStructs.VoodooGhostBytes)
                     {
-                        LastError = "Voodoo/centroid/snap-node ABI size mismatch";
+                        LastError = "Voodoo/centroid/portal ABI size mismatch";
                         IsLoaded = false;
                         Debug.LogError($"[3OS] {LastError}");
                         return;
@@ -579,6 +609,50 @@ namespace ThreeOS
             }
             catch (Exception ex) { LastError = ex.Message; return false; }
         }
+
+        public uint VoodooPortalCount =>
+            IsLoaded && NativeAbiVersion >= 6 ? threeos_voodoo_portal_count() : 0u;
+
+        public bool VoodooCreationAllowed =>
+            IsLoaded && NativeAbiVersion >= 6 && threeos_voodoo_creation_allowed() != 0;
+
+        public bool TryGetVoodooPortal(uint index, out InteropVoodooPortal portal)
+        {
+            portal = default;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_voodoo_get_portal(index, out portal);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public uint VoodooPortalGhostCount(ulong portalId) =>
+            IsLoaded && NativeAbiVersion >= 6 ? threeos_voodoo_portal_ghost_count(portalId) : 0u;
+
+        public bool TryGetVoodooPortalGhost(ulong portalId, uint index, out InteropVoodooGhost ghost)
+        {
+            ghost = default;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_voodoo_get_portal_ghost(portalId, index, out ghost);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool DismissVoodooPortal(ulong portalId) =>
+            IsLoaded && NativeAbiVersion >= 6 && Call(() => threeos_voodoo_dismiss_portal(portalId));
+
+        public bool PointInAnyNearBb(Vector3 openXrPoint) =>
+            IsLoaded && NativeAbiVersion >= 6 &&
+            threeos_voodoo_point_in_near_bb(openXrPoint.x, openXrPoint.y, openXrPoint.z) != 0;
 
         public bool SetScale(float worldToProxyRatio) =>
             Call(() => threeos_topology_set_scale(worldToProxyRatio));
