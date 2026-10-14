@@ -28,6 +28,11 @@ namespace ThreeOS
         public float PossessDistance = 0.45f;
         /// <summary>Trigger held at least this long starts drag (telekinesis); shorter tap selects.</summary>
         public float TriggerHoldDragSeconds = 0.22f;
+        /// <summary>
+        /// Selected ghost + pinch outside home BB is summon on short release. Drag must
+        /// wait longer than a normal pinch (~0.12–0.25 s) or the HUD steals summon.
+        /// </summary>
+        public float SummonZoneHoldDragSeconds = 0.40f;
         public float TriggerAxisThreshold = 0.55f;
         /// <summary>Second short trigger on the same Box within this window opens it.</summary>
         public float BoxDoubleTapSeconds = 0.4f;
@@ -49,22 +54,30 @@ namespace ThreeOS
         /// <summary>Task 6.4 near-portal ghosts (labels + Fresnel); key = portalId&lt;&lt;32 | entityId low bits + parent flag.</summary>
         private readonly Dictionary<ulong, GlyphView> _ghostViews = new Dictionary<ulong, GlyphView>();
         private readonly Dictionary<ulong, ExpandedBoxUi> _expandedBoxes = new Dictionary<ulong, ExpandedBoxUi>();
+        /// <summary>Task 6.7 near-BB X-close affordances (key = portal id).</summary>
+        private readonly Dictionary<ulong, PortalDismissUi> _portalDismiss = new Dictionary<ulong, PortalDismissUi>();
         private readonly HashSet<ulong> _animLockedIds = new HashSet<ulong>();
         private ThreeOSArrowVisual _insertArrow;
         private bool _triggerWasDown;
         private float _triggerDownTime;
         private bool _triggerDragActive;
         private bool _triggerGestureConsumed;
+        /// Cursor at trigger-down (OpenXR); used to ignore summon when the press was a drag swipe.
+        private Vector3 _triggerDownCursorXr;
+        private bool _triggerDownCursorValid;
         /// <summary>Hand that started the current trigger press: 0=left, 1=right, -1=none.</summary>
         private int _selectHand = -1;
         private bool _possessing;
         private ulong _possessedId;
+        private bool _ghostDragging;
 
         /// <summary>
         /// While telekinesis is active, which hand must drive stick/kinematics (0/1), else -1.
         /// InputRouter reads this before <c>Tick</c> to mute the other hand.
+        /// Ghost-scale drag also latches the drive hand so the other cursor is muted.
         /// </summary>
-        public int PossessDriveHand => _possessing && _selectHand >= 0 ? _selectHand : -1;
+        public int PossessDriveHand =>
+            (_possessing || _ghostDragging) && _selectHand >= 0 ? _selectHand : -1;
         private bool _insertAnimBusy;
         private bool _boxAnimBusy;
         private ulong _lastShortTapId;
@@ -76,6 +89,10 @@ namespace ThreeOS
         private bool _waitingForAllFilesAccess;
         private string _selectionLabel = "none";
         private ulong _xHoverBoxId;
+        /// <summary>Portal X under left / right point cursor (0 = none). Independent so both hands can dismiss.</summary>
+        private readonly ulong[] _xHoverPortalHand = new ulong[2];
+        private bool _leftTriggerWasDown;
+        private bool _rightTriggerWasDown;
 
         // All Boxes share one ThreeOS/Glyph material; selection is _Selected via MPB.
         private Material _sharedBoxMaterial;
@@ -121,6 +138,14 @@ namespace ThreeOS
             public GameObject XRoot;
             public Transform XVisual;
             /// <summary>Sticky hover (distance hysteresis); not physics/colliders.</summary>
+            public bool Hovered;
+        }
+
+        private sealed class PortalDismissUi
+        {
+            public ulong PortalId;
+            public GameObject XRoot;
+            public Transform XVisual;
             public bool Hovered;
         }
 
@@ -372,6 +397,7 @@ namespace ThreeOS
             SyncGhostViewsFromKernel();
             // X hover before trigger so left-hand press can close on the same frame.
             UpdateExpandedDismissAffordances();
+            UpdatePortalDismissAffordances();
             HandleTriggerSelectAndDrag();
             SyncSelectionMaterials();
             UpdateInsertArrow();
@@ -1167,6 +1193,7 @@ namespace ThreeOS
 
             _views.Clear();
             ClearGhostViews();
+            ClearPortalDismissUi();
             var count = _bridge.StorageItemCount();
             for (uint i = 0; i < count; i++)
             {
@@ -1724,6 +1751,7 @@ namespace ThreeOS
         private void OnDestroy()
         {
             TeardownAllExpandedBoxes(collapseKernel: false);
+            ClearPortalDismissUi();
             if (_sharedBoxMaterial != null)
             {
                 Destroy(_sharedBoxMaterial);
@@ -1865,12 +1893,14 @@ namespace ThreeOS
         {
             if (_topology != null && (_topology.DomeActive || _topology.LatticeActive))
             {
-                if (_triggerDragActive && _possessing)
+                if (_triggerDragActive && (_possessing || _ghostDragging))
                 {
-                    ReleasePossessedFromTrigger();
+                    ReleaseDragFromTrigger();
                 }
 
                 _triggerWasDown = false;
+                _leftTriggerWasDown = false;
+                _rightTriggerWasDown = false;
                 _triggerDragActive = false;
                 _triggerGestureConsumed = false;
                 _selectHand = -1;
@@ -1881,6 +1911,22 @@ namespace ThreeOS
             var leftDown = frame.leftTrigger >= TriggerAxisThreshold;
             var rightDown = frame.rightTrigger >= TriggerAxisThreshold;
             var triggerDown = leftDown || rightDown;
+
+            // Per-hand rising edge: each hand can dismiss its hovered near-BB X independently.
+            var leftDismissed = false;
+            var rightDismissed = false;
+            if (leftDown && !_leftTriggerWasDown)
+            {
+                leftDismissed = TryDismissHoveredPortal(0);
+            }
+
+            if (rightDown && !_rightTriggerWasDown)
+            {
+                rightDismissed = TryDismissHoveredPortal(1);
+            }
+
+            _leftTriggerWasDown = leftDown;
+            _rightTriggerWasDown = rightDown;
 
             if (triggerDown && !_triggerWasDown)
             {
@@ -1900,7 +1946,11 @@ namespace ThreeOS
                 _triggerDownTime = Time.unscaledTime;
                 _triggerDragActive = false;
                 _triggerGestureConsumed = false;
-                if (TryBeginCloseOnXHover())
+                _triggerDownCursorXr = SelectHandCursorOpenXr();
+                _triggerDownCursorValid = true;
+                var dismissedThisHand = (_selectHand == 0 && leftDismissed) ||
+                                        (_selectHand == 1 && rightDismissed);
+                if (dismissedThisHand || TryBeginCloseOnXHover())
                 {
                     _triggerGestureConsumed = true;
                 }
@@ -1909,20 +1959,61 @@ namespace ThreeOS
             var aimUnity = SelectAimUnity(_selectHand, out var rayDir);
 
             if (triggerDown && _triggerWasDown && !_triggerDragActive && !_possessing &&
-                !_triggerGestureConsumed)
+                !_ghostDragging && !_triggerGestureConsumed)
             {
-                if (Time.unscaledTime - _triggerDownTime >= TriggerHoldDragSeconds)
+                _bridge.TryGetSelection(out var selForHold);
+                var cursorXr = SelectHandCursorOpenXr();
+                var homePortal = selForHold != 0 ? _bridge.PortalForGhost(selForHold) : 0UL;
+                var portalAtCursor = _bridge.PortalAtNearPoint(cursorXr);
+                // Summon zone: selected ghost + cursor outside its home near BB.
+                // Use a longer hold so a normal pinch releases as summon, not far-drag.
+                var summonZone = homePortal != 0 && portalAtCursor != homePortal;
+                float holdSec;
+                if (summonZone)
                 {
-                    // Use the pressing hand's cursor palm (not aggregated intents — those
-                    // can prefer the other hand). Re-evaluate each frame so a brief
-                    // palm-down does not permanently block a later sideways drag.
-                    var palm = SelectHandPalmMode();
-                    if (palm == PalmMode.Sideways)
+                    holdSec = Mathf.Max(TriggerHoldDragSeconds, SummonZoneHoldDragSeconds);
+                }
+                else if (selForHold != 0)
+                {
+                    // Inside home BB / near-real: still prefer drag over re-select.
+                    holdSec = Mathf.Min(TriggerHoldDragSeconds, 0.14f);
+                }
+                else
+                {
+                    holdSec = TriggerHoldDragSeconds;
+                }
+
+                if (Time.unscaledTime - _triggerDownTime >= holdSec)
+                {
+                    var selectedId = selForHold;
+                    // Hover glyph/ghost under the cursor wins over a prior selection so
+                    // direct-drag on B works while A is selected. Unselected + palm-down:
+                    // leave yellow voodoo (no Windows grab). No hit + selection: drag
+                    // selection (palm ignored) — velocity / possess / ghost-scale as before.
+                    ulong dragId = 0;
+                    if (TryHitTestYawAligned(aimUnity.position, rayDir, out var hitId) &&
+                        TryFindItem(hitId, out var hitItem) &&
+                        (hitItem.kind == 0 || hitItem.kind == 1) &&
+                        (selectedId != 0 || SelectHandPalmMode() != PalmMode.Down))
+                    {
+                        if (hitId != selectedId && _bridge.SetSelection(hitId))
+                        {
+                            _selectionLabel = hitItem.Name;
+                            _status = $"Sel:{_selectionLabel}";
+                        }
+
+                        dragId = hitId;
+                    }
+                    else if (selectedId != 0)
+                    {
+                        dragId = selectedId;
+                    }
+
+                    if (dragId != 0)
                     {
                         _triggerDragActive = true;
-                        TryPossessNearest(aimUnity.position);
+                        TryBeginSelectedDrag(dragId, aimUnity.position);
                     }
-                    // Palm down → snap voodoo (kernel session). Palm up → wait (Quest OS).
                 }
             }
 
@@ -1932,40 +2023,129 @@ namespace ThreeOS
                 {
                     // X close (or other consumed press) — do not select/drag.
                 }
-                else if (_triggerDragActive || _possessing)
+                else if (_triggerDragActive || _possessing || _ghostDragging)
                 {
-                    if (_possessing)
-                    {
-                        ReleasePossessedFromTrigger();
-                    }
+                    ReleaseDragFromTrigger();
                 }
                 else if (SelectHandPalmMode() == PalmMode.Down &&
                          Time.unscaledTime - _triggerDownTime >= TriggerHoldDragSeconds)
                 {
                     // Held palm-down for voodoo — do not treat release as a select tap.
                 }
+                else if (_triggerDownCursorValid &&
+                         Vector3.Distance(SelectHandCursorOpenXr(), _triggerDownCursorXr) >
+                         SummonSwipeCancelMeters())
+                {
+                    // Moved while held but never crossed drag threshold — abort, do not summon.
+                    _status = "drag cancelled";
+                }
                 else
                 {
-                    // Short press: double-tap Box opens; else select hit glyph or clear.
+                    // Short press: double-tap Box opens; else select / summon / deselect.
                     HandleShortTriggerTap(aimUnity.position, rayDir);
                 }
 
                 _triggerDragActive = false;
                 _triggerGestureConsumed = false;
+                _triggerDownCursorValid = false;
                 _selectHand = -1;
             }
 
             _triggerWasDown = triggerDown;
         }
 
+        /// <summary>
+        /// Cursor travel that cancels a short-release summon. Wider in summon zone so
+        /// Quest hand jitter during a deliberate pinch does not abort.
+        /// </summary>
+        private float SummonSwipeCancelMeters()
+        {
+            if (!_bridge.TryGetSelection(out var sel) || sel == 0)
+            {
+                return 0.03f;
+            }
+
+            var home = _bridge.PortalForGhost(sel);
+            if (home == 0)
+            {
+                return 0.03f;
+            }
+
+            var at = _bridge.PortalAtNearPoint(SelectHandCursorOpenXr());
+            return at != home ? 0.08f : 0.03f;
+        }
+
         private void HandleShortTriggerTap(Vector3 rayOrigin, Vector3 rayDir)
         {
-            if (_boxAnimBusy)
+            if (_boxAnimBusy || _insertAnimBusy)
             {
                 return;
             }
 
-            if (!TryHitTestYawAligned(rayOrigin, rayDir, out var hitId))
+            _bridge.TryGetSelection(out var selectedId);
+            var hitSomething = TryHitTestYawAligned(rayOrigin, rayDir, out var hitId);
+            var pinchXr = SelectHandCursorOpenXr();
+            var homePortal = selectedId != 0 ? _bridge.PortalForGhost(selectedId) : 0UL;
+            var portalAtPinch = _bridge.PortalAtNearPoint(pinchXr);
+            var hitPortal = hitSomething ? _bridge.PortalForGhost(hitId) : 0UL;
+
+            // Select-drop onto a Box (same or other near BB): insert, don't retarget selection.
+            // Near-field matrix without portals still uses tap-to-select (no auto-insert).
+            if (selectedId != 0 && hitSomething &&
+                TryFindItem(hitId, out var boxHit) && boxHit.kind == 1 && hitId != selectedId &&
+                (homePortal != 0 || hitPortal != 0 || portalAtPinch != 0))
+            {
+                if (_bridge.InsertInto(selectedId, hitId))
+                {
+                    _bridge.ClearSelection();
+                    _selectionLabel = "none";
+                    _status = $"insert → {boxHit.Name}";
+                    _lastShortTapId = 0;
+                    RemoveGhostViewsForEntity(selectedId);
+                }
+                else
+                {
+                    _status = $"insert failed: {_bridge.LastError}";
+                }
+
+                return;
+            }
+
+            // Task 6.5: empty pinch with selection → deselect / summon / insert.
+            if (selectedId != 0 && !hitSomething)
+            {
+                // Selected ghost + empty inside home BB → deselect.
+                if (homePortal != 0 && portalAtPinch == homePortal)
+                {
+                    _bridge.ClearSelection();
+                    _selectionLabel = "none";
+                    _status = "Sel:none";
+                    _lastShortTapId = 0;
+                    return;
+                }
+
+                // Ghost outside / cross-portal, or near-real into a BB → summon/insert + lerp.
+                if (_bridge.VoodooSummon(selectedId, pinchXr))
+                {
+                    if (homePortal == 0 && portalAtPinch != 0)
+                    {
+                        _status = "insert → far (lerp)";
+                    }
+                    else if (portalAtPinch != 0 && portalAtPinch != homePortal)
+                    {
+                        _status = "summon cross-portal (lerp)";
+                    }
+                    else
+                    {
+                        _status = "summon near-field (lerp)";
+                    }
+
+                    _lastShortTapId = 0;
+                    return;
+                }
+            }
+
+            if (!hitSomething)
             {
                 _lastShortTapId = 0;
                 ApplySelectAtAim(rayOrigin, rayDir);
@@ -1989,6 +2169,29 @@ namespace ThreeOS
             _lastShortTapId = hitId;
             _lastShortTapTime = now;
             ApplySelectAtAim(rayOrigin, rayDir);
+        }
+
+        private void RemoveGhostViewsForEntity(ulong entityId)
+        {
+            if (entityId == 0 || _ghostViews.Count == 0)
+            {
+                return;
+            }
+
+            var dead = new List<ulong>();
+            foreach (var kv in _ghostViews)
+            {
+                if (kv.Value.EntityId == entityId)
+                {
+                    dead.Add(kv.Key);
+                }
+            }
+
+            foreach (var key in dead)
+            {
+                DestroyGlyphView(_ghostViews[key]);
+                _ghostViews.Remove(key);
+            }
         }
 
         private void ApplySelectAtAim(Vector3 rayOrigin, Vector3 rayDir)
@@ -2018,16 +2221,11 @@ namespace ThreeOS
             var hadSnap = _bridge.TryGetSnap(out var snap) && snap.pending != 0;
             if (!_bridge.ReleasePossessed())
             {
-                if (hadSnap && _bridge.TryCommitInsert())
-                {
-                    _status = "insert committed (retry)";
-                }
-                else
-                {
-                    _status = hadSnap
-                        ? $"insert failed: {_bridge.LastError}"
-                        : $"released (coast): {_bridge.LastError}";
-                }
+                // Do not retry TryCommitInsert — kernel owns snap commit/clear on
+                // release; host retries caused multi-box FS thrash / frame spikes.
+                _status = hadSnap
+                    ? $"insert failed: {_bridge.LastError}"
+                    : $"released (coast): {_bridge.LastError}";
             }
             else
             {
@@ -2037,6 +2235,101 @@ namespace ThreeOS
             _possessing = false;
             _possessedId = 0;
             _triggerDragActive = false;
+        }
+
+        private void ReleaseDragFromTrigger()
+        {
+            if (_ghostDragging && _selectHand >= 0)
+            {
+                var hadSnap = _bridge.TryGetSnap(out var snap) && snap.pending != 0;
+                var pinchXr = SelectHandCursorOpenXr();
+                var inside = _bridge.PointInAnyNearBb(pinchXr);
+                var ok = _bridge.GhostDragEnd((uint)_selectHand, inside);
+                if (hadSnap)
+                {
+                    // Kernel re-validates near snap range on end; do not retry commit
+                    // (avoids double-insert / multi-box FS thrash and frame spikes).
+                    _status = ok
+                        ? "ghost insert — waiting FS"
+                        : $"ghost snap released: {_bridge.LastError}";
+                }
+                else
+                {
+                    _status = inside ? "ghost drag end (inside)" : "ghost drag end";
+                }
+
+                _ghostDragging = false;
+                _triggerDragActive = false;
+                return;
+            }
+
+            if (_possessing)
+            {
+                ReleasePossessedFromTrigger();
+            }
+        }
+
+        private Vector3 SelectHandCursorOpenXr()
+        {
+            if (_input != null)
+            {
+                if (_selectHand == 0 && _input.LastLeftCursor.active != 0)
+                {
+                    var p = _input.LastLeftCursor.position;
+                    return new Vector3(p.x, p.y, p.z);
+                }
+
+                if (_selectHand == 1 && _input.LastRightCursor.active != 0)
+                {
+                    var p = _input.LastRightCursor.position;
+                    return new Vector3(p.x, p.y, p.z);
+                }
+            }
+
+            var aim = SelectAimUnity(_selectHand, out _);
+            return InteropStructs.UnityToOpenXrPosition(aim.position);
+        }
+
+        private void TryBeginSelectedDrag(ulong selectedId, Vector3 aimUnity)
+        {
+            if (_selectHand < 0)
+            {
+                return;
+            }
+
+            var cursorXr = SelectHandCursorOpenXr();
+            var homePortal = _bridge.PortalForGhost(selectedId);
+            var portalAtCursor = _bridge.PortalAtNearPoint(cursorXr);
+
+            // Committed ghost inside home BB → ghost-scale drag.
+            // Near-field real (no ghost) → audition drag (kernel handles enter/exit BB).
+            // Committed ghost outside home BB → far telekinesis of the real.
+            if (homePortal != 0 && portalAtCursor == homePortal)
+            {
+                if (_bridge.GhostDragBegin((uint)_selectHand, selectedId))
+                {
+                    _ghostDragging = true;
+                    _possessedId = selectedId;
+                    _status = "ghost drag — blue stick";
+                    return;
+                }
+            }
+
+            if (homePortal == 0)
+            {
+                if (_bridge.GhostDragBegin((uint)_selectHand, selectedId))
+                {
+                    _ghostDragging = true;
+                    _possessedId = selectedId;
+                    // Kernel picks direct (cursor-in-glyph) vs velocity stick for near-field.
+                    _status = portalAtCursor != 0
+                        ? "audition insert — ghost in BB"
+                        : "near drag — direct if in glyph, else stick";
+                    return;
+                }
+            }
+
+            TryPossessNearest(aimUnity);
         }
 
         private bool PossessForSelectHand(ulong entityId, ThreeOSPose objectPose)
@@ -2082,71 +2375,32 @@ namespace ThreeOS
 
             _bridge.TryGetSelection(out var selectedId);
 
-            // Selection-gated far telekinesis: possess the selected glyph from any distance.
-            if (selectedId != 0 &&
-                _views.TryGetValue(selectedId, out var selectedView) &&
+            // Selection-gated only — never possess a deselected / nearest glyph.
+            if (selectedId == 0 ||
+                !TryFindItem(selectedId, out var selectedItem) ||
+                (selectedItem.kind != 0 && selectedItem.kind != 1))
+            {
+                _status = "grab requires selection";
+                return;
+            }
+
+            // Prefer live view pose; fall back to kernel workspace pose when the far glyph
+            // is missing/inactive so outside-home velocity still engages for ghosts.
+            ThreeOSPose possessPose = selectedItem.pose;
+            if (_views.TryGetValue(selectedId, out var selectedView) &&
                 selectedView.Root != null && selectedView.Root.activeInHierarchy &&
-                selectedView.Movable != null &&
-                TryFindItem(selectedId, out var selectedItem) &&
-                (selectedItem.kind == 0 || selectedItem.kind == 1))
+                selectedView.Movable != null)
             {
-                if (PossessForSelectHand(selectedId, selectedView.Movable.CurrentOpenXrPose()))
-                {
-                    _possessing = true;
-                    _possessedId = selectedId;
-                    _status = selectedItem.kind == 1
-                        ? "far possess folder — stick drag"
-                        : "far possess — drag onto a folder";
-                }
-                else
-                {
-                    _status = $"possess failed: {_bridge.LastError}";
-                }
-
-                return;
+                possessPose = selectedView.Movable.CurrentOpenXrPose();
             }
 
-            float best = PossessDistance;
-            ulong bestId = 0;
-            ThreeOSPose bestPose = default;
-            foreach (var kv in _views)
-            {
-                if (kv.Value.Root == null || !kv.Value.Root.activeInHierarchy ||
-                    kv.Value.Movable == null)
-                {
-                    continue;
-                }
-
-                // Possess both Objects and Boxes (folders). Snap-insert supports
-                // object→box and box→box.
-                if (!TryFindItem(kv.Key, out var item) || (item.kind != 0 && item.kind != 1))
-                {
-                    continue;
-                }
-
-                var d = Vector3.Distance(aimUnity, kv.Value.Root.transform.position);
-                if (d < best)
-                {
-                    best = d;
-                    bestId = kv.Key;
-                    bestPose = kv.Value.Movable.CurrentOpenXrPose();
-                }
-            }
-
-            if (bestId == 0)
-            {
-                _status = "grab missed";
-                return;
-            }
-
-            if (PossessForSelectHand(bestId, bestPose))
+            if (PossessForSelectHand(selectedId, possessPose))
             {
                 _possessing = true;
-                _possessedId = bestId;
-                var isBox = TryFindItem(bestId, out var possessed) && possessed.kind == 1;
-                _status = isBox
-                    ? "possessed folder — drag onto a folder"
-                    : "possessed — drag onto a folder";
+                _possessedId = selectedId;
+                _status = selectedItem.kind == 1
+                    ? "far possess folder — stick drag"
+                    : "far possess — drag onto a folder";
             }
             else
             {
@@ -2186,7 +2440,7 @@ namespace ThreeOS
                 bestId = kv.Key;
             }
 
-            // Task 6.4: select ghosts → same far entity id (no drag yet).
+            // Task 6.4/6.5: select ghosts → same far entity id (drag via ghost-scale path).
             if (_bridge != null && _bridge.IsLoaded)
             {
                 var portals = _bridge.VoodooPortalCount;
@@ -2367,9 +2621,39 @@ namespace ThreeOS
                 return true;
             }
 
+            // Ghost-drag updates workspace each tick; SyncViews should still apply poses.
+            if (_ghostDragging && _possessedId == entityId)
+            {
+                return false;
+            }
+
             if (_bridge.TryGetKineticState(out var ks) && ks.entityId == entityId &&
                 (ks.phase == (uint)KineticPhase.Possessed || ks.phase == (uint)KineticPhase.Coasting))
             {
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryFindSnapGlyphRoot(ulong entityId, out Transform root)
+        {
+            root = null;
+            // Prefer near ghosts so the drop affordance sits in the near-BB gap.
+            foreach (var kv in _ghostViews)
+            {
+                if (kv.Value.EntityId == entityId && kv.Value.Root != null &&
+                    kv.Value.Root.activeInHierarchy)
+                {
+                    root = kv.Value.Root.transform;
+                    return true;
+                }
+            }
+
+            if (_views.TryGetValue(entityId, out var view) && view.Root != null &&
+                view.Root.activeInHierarchy)
+            {
+                root = view.Root.transform;
                 return true;
             }
 
@@ -2384,16 +2668,53 @@ namespace ThreeOS
                 return;
             }
 
-            if (!_views.TryGetValue(snap.objectId, out var view) || view.Root == null)
+            if (!TryFindSnapGlyphRoot(snap.objectId, out var objT) ||
+                !TryFindSnapGlyphRoot(snap.boxId, out var boxT))
             {
                 _insertArrow.Hide();
                 return;
             }
 
-            // Shaft above the head tip so the cone points down into the target box.
-            var tip = view.Root.transform.position + Vector3.down * 0.15f;
-            var shaftStart = tip + Vector3.up * 0.045f;
-            _insertArrow.Set(shaftStart, tip, new Color(1f, 0.85f, 0.2f, 0.9f));
+            // Static down arrow parked in the hold gap (not the velocity stick).
+            var objPos = objT.position;
+            var boxPos = boxT.position;
+            var x = (objPos.x + boxPos.x) * 0.5f;
+            var z = (objPos.z + boxPos.z) * 0.5f;
+            var gap = objPos.y - boxPos.y;
+            Vector3 shaftStart;
+            Vector3 tip;
+            if (gap > 0.03f)
+            {
+                shaftStart = new Vector3(x, boxPos.y + gap * 0.72f, z);
+                tip = new Vector3(x, boxPos.y + gap * 0.28f, z);
+            }
+            else
+            {
+                // Degenerate / overlapping: still show a compact drop cue.
+                var midY = (objPos.y + boxPos.y) * 0.5f;
+                shaftStart = new Vector3(x, midY + 0.02f, z);
+                tip = new Vector3(x, midY - 0.02f, z);
+            }
+
+            var nearSnap = IsNearFieldSnapGlyph(snap.objectId) || IsNearFieldSnapGlyph(snap.boxId);
+            var shaftColor = nearSnap
+                ? new Color(0.35f, 0.75f, 1f, 0.9f)
+                : new Color(1f, 0.85f, 0.2f, 0.9f);
+            _insertArrow.Set(shaftStart, tip, shaftColor);
+        }
+
+        private bool IsNearFieldSnapGlyph(ulong entityId)
+        {
+            foreach (var kv in _ghostViews)
+            {
+                if (kv.Value.EntityId == entityId && kv.Value.Root != null &&
+                    kv.Value.Root.activeInHierarchy)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void HandleStorageEvents()
@@ -2417,18 +2738,35 @@ namespace ThreeOS
             var ok = false;
             var src = string.Empty;
             var dst = string.Empty;
+            // Note: C# forbids yield inside try/catch — use try/finally only.
             try
             {
                 // Dropping a child from an open cluster invalidates expand UI before views move.
                 TeardownAllExpandedBoxes(collapseKernel: true);
 
-                // Always play open / bump / close first.
+                // Prefer far-field glyph; fall back to a near ghost of the destination box.
+                Transform bumpT = null;
                 if (_views.TryGetValue(ev.boxId, out var boxView) && boxView.Root != null)
                 {
+                    bumpT = boxView.Root.transform;
+                }
+                else
+                {
+                    foreach (var kv in _ghostViews)
+                    {
+                        if (kv.Value.EntityId == ev.boxId && kv.Value.Root != null)
+                        {
+                            bumpT = kv.Value.Root.transform;
+                            break;
+                        }
+                    }
+                }
+
+                if (bumpT != null)
+                {
                     _bridge.SetBoxOpen(ev.boxId, true);
-                    var t = boxView.Root.transform;
-                    var baseScale = t.localScale;
-                    yield return AnimateScaleBump(t, baseScale, 1.15f, 0.12f);
+                    var baseScale = bumpT.localScale;
+                    yield return AnimateScaleBump(bumpT, baseScale, 1.15f, 0.12f);
                     _bridge.SetBoxOpen(ev.boxId, false);
                     yield return new WaitForSeconds(0.08f);
                 }
@@ -2439,26 +2777,38 @@ namespace ThreeOS
 
                 ResolveInsertPaths(ev, out var objName, out var boxName, out var sourceRel,
                     out var destRel);
-                var sourceIsBox = TryFindItem(ev.objectId, out var srcItem) && srcItem.kind == 1;
-                _status = $"moving {objName} → {boxName}/";
-                yield return CommitInsertToDisk(objName, boxName, sourceIsBox, sourceRel, destRel,
-                    result =>
+                // Same path (already nested under target): kernel parent is updated; skip FS cut.
+                if (!string.IsNullOrEmpty(sourceRel) &&
+                    string.Equals(NormalizeDemoRel(sourceRel), NormalizeDemoRel(destRel),
+                        System.StringComparison.OrdinalIgnoreCase))
                 {
-                    ok = result.ok;
-                    src = result.src;
-                    dst = result.dst;
-                });
-
-                _status = ok
-                    ? $"moved → {ShortPath(dst)}"
-                    : $"FS move failed — {ShortPath(string.IsNullOrEmpty(dst) ? src : dst)}";
-                if (!ok)
-                {
-                    Debug.LogError($"[3OS] {_status} (src={src} dst={dst} root={_demoRoot})");
+                    ok = true;
+                    dst = destRel;
+                    _status = $"already in {boxName}/";
                 }
                 else
                 {
-                    Debug.Log($"[3OS] {_status} (full={dst})");
+                    var sourceIsBox = TryFindItem(ev.objectId, out var srcItem) && srcItem.kind == 1;
+                    _status = $"moving {objName} → {boxName}/";
+                    yield return CommitInsertToDisk(objName, boxName, sourceIsBox, sourceRel, destRel,
+                        result =>
+                        {
+                            ok = result.ok;
+                            src = result.src;
+                            dst = result.dst;
+                        });
+
+                    _status = ok
+                        ? $"moved → {ShortPath(dst)}"
+                        : $"FS move failed — {ShortPath(string.IsNullOrEmpty(dst) ? src : dst)}";
+                    if (!ok)
+                    {
+                        Debug.LogError($"[3OS] {_status} (src={src} dst={dst} root={_demoRoot})");
+                    }
+                    else
+                    {
+                        Debug.Log($"[3OS] {_status} (full={dst})");
+                    }
                 }
             }
             finally
@@ -3361,6 +3711,7 @@ namespace ThreeOS
 
         private bool TryBeginCloseOnXHover()
         {
+            // Portal X is handled per-hand in HandleTriggerSelectAndDrag.
             if (_boxAnimBusy || _xHoverBoxId == 0 || !_expandedBoxes.ContainsKey(_xHoverBoxId))
             {
                 return false;
@@ -3368,6 +3719,206 @@ namespace ThreeOS
 
             StartCoroutine(CloseBoxSequence(_xHoverBoxId));
             return true;
+        }
+
+        private bool TryDismissHoveredPortal(int hand)
+        {
+            if (hand < 0 || hand > 1)
+            {
+                return false;
+            }
+
+            var pid = _xHoverPortalHand[hand];
+            if (pid == 0)
+            {
+                return false;
+            }
+
+            if (_ghostDragging && _selectHand == hand)
+            {
+                ReleaseDragFromTrigger();
+            }
+
+            if (!_bridge.DismissVoodooPortal(pid))
+            {
+                return false;
+            }
+
+            DestroyPortalDismissUi(pid);
+            _xHoverPortalHand[hand] = 0;
+            if (_xHoverPortalHand[1 - hand] == pid)
+            {
+                _xHoverPortalHand[1 - hand] = 0;
+            }
+
+            _status = hand == 0 ? "voodoo portal dismissed (L)" : "voodoo portal dismissed (R)";
+            return true;
+        }
+
+        private void UpdatePortalDismissAffordances()
+        {
+            _xHoverPortalHand[0] = 0;
+            _xHoverPortalHand[1] = 0;
+            if (_bridge == null || !_bridge.IsLoaded || _bridge.NativeAbiVersion < 6 || _input == null)
+            {
+                ClearPortalDismissUi();
+                return;
+            }
+
+            var n = (int)_bridge.VoodooPortalCount;
+            var live = new HashSet<ulong>();
+            var enterRadius = DismissXDiameterM * 0.5f;
+            var exitRadius = enterRadius * 2.25f;
+
+            var haveL = _input.LastLeftCursor.active != 0;
+            var haveR = _input.LastRightCursor.active != 0;
+            var leftPos = haveL
+                ? InteropStructs.OpenXrToUnityPosition(_input.LastLeftCursor.position.ToVector3())
+                : Vector3.zero;
+            var rightPos = haveR
+                ? InteropStructs.OpenXrToUnityPosition(_input.LastRightCursor.position.ToVector3())
+                : Vector3.zero;
+            if (!haveL && !haveR)
+            {
+                leftPos = SelectAimUnity(out _).position;
+                haveL = true;
+            }
+
+            for (var i = 0; i < n; i++)
+            {
+                if (!_bridge.TryGetVoodooPortal((uint)i, out var portal) || portal.nearBb.open == 0)
+                {
+                    continue;
+                }
+
+                live.Add(portal.id);
+                if (!_portalDismiss.TryGetValue(portal.id, out var ui) || ui.XRoot == null)
+                {
+                    var xPos = PortalCloseButtonUnity(portal.nearBb, portal.creatingHand);
+                    ui = new PortalDismissUi
+                    {
+                        PortalId = portal.id,
+                        XRoot = CreateDismissX(xPos),
+                    };
+                    if (ui.XRoot != null)
+                    {
+                        ui.XRoot.name = $"3OS_PortalDismissX_{portal.id}";
+                        var visual = ui.XRoot.transform.Find("XVisual");
+                        ui.XVisual = visual != null ? visual : ui.XRoot.transform;
+                    }
+
+                    _portalDismiss[portal.id] = ui;
+                }
+
+                var pos = PortalCloseButtonUnity(portal.nearBb, portal.creatingHand);
+                ui.XRoot.transform.position = pos;
+                var cam = Camera.main;
+                if (cam != null)
+                {
+                    ui.XRoot.transform.rotation =
+                        Quaternion.LookRotation((cam.transform.position - pos).normalized, Vector3.up);
+                }
+
+                var distL = haveL ? Vector3.Distance(leftPos, pos) : float.MaxValue;
+                var distR = haveR ? Vector3.Distance(rightPos, pos) : float.MaxValue;
+                var dist = Mathf.Min(distL, distR);
+                if (ui.Hovered)
+                {
+                    ui.Hovered = dist <= exitRadius;
+                }
+                else
+                {
+                    ui.Hovered = dist <= enterRadius;
+                }
+
+                if (ui.Hovered)
+                {
+                    var lim = ui.Hovered ? exitRadius : enterRadius;
+                    if (distL <= lim)
+                    {
+                        _xHoverPortalHand[0] = portal.id;
+                    }
+
+                    if (distR <= lim)
+                    {
+                        _xHoverPortalHand[1] = portal.id;
+                    }
+                }
+
+                if (ui.XVisual != null)
+                {
+                    ui.XVisual.localScale = ui.Hovered ? Vector3.one * 2f : Vector3.one;
+                }
+            }
+
+            // Tear down X for portals that were dismissed / no longer reported.
+            var stale = new List<ulong>();
+            foreach (var kv in _portalDismiss)
+            {
+                if (!live.Contains(kv.Key))
+                {
+                    stale.Add(kv.Key);
+                }
+            }
+
+            foreach (var id in stale)
+            {
+                DestroyPortalDismissUi(id);
+            }
+        }
+
+        /// <summary>
+        /// Near-BB X-close at mid-height on the front face: left if R-created, right if
+        /// L-created (OpenXR local; front = +Z toward user). Mid-Y so expand stays reachable.
+        /// </summary>
+        private static Vector3 PortalCloseButtonUnity(in InteropVoodooBoundingBox bb,
+            uint creatingHand)
+        {
+            var pad = DismissXDiameterM * 0.35f;
+            var hx = bb.extents.x * 0.5f + pad;
+            var hz = bb.extents.z * 0.5f + pad;
+            var y = bb.pose.orientation.y;
+            var w = bb.pose.orientation.w;
+            // R-created → mid-front-left (−X); L-created → mid-front-right (+X).
+            var lx = creatingHand == 0u ? hx : -hx;
+            var lz = hz;
+            var wx = lx * (1f - 2f * y * y) + lz * (2f * w * y);
+            var wz = lz * (1f - 2f * y * y) - lx * (2f * w * y);
+            var openXr = new Vector3(
+                bb.pose.position.x + wx,
+                bb.pose.position.y,
+                bb.pose.position.z + wz);
+            return InteropStructs.OpenXrToUnityPosition(openXr);
+        }
+
+        private void DestroyPortalDismissUi(ulong portalId)
+        {
+            if (!_portalDismiss.TryGetValue(portalId, out var ui))
+            {
+                return;
+            }
+
+            if (ui.XRoot != null)
+            {
+                Destroy(ui.XRoot);
+            }
+
+            _portalDismiss.Remove(portalId);
+        }
+
+        private void ClearPortalDismissUi()
+        {
+            foreach (var kv in _portalDismiss)
+            {
+                if (kv.Value.XRoot != null)
+                {
+                    Destroy(kv.Value.XRoot);
+                }
+            }
+
+            _portalDismiss.Clear();
+            _xHoverPortalHand[0] = 0;
+            _xHoverPortalHand[1] = 0;
         }
 
         private void UpdateExpandedDismissAffordances()

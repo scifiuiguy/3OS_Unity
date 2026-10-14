@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace ThreeOS
@@ -27,6 +27,7 @@ namespace ThreeOS
         private sealed class HandViz
         {
             public ThreeOSArrowVisual Arrow;
+            public ThreeOSArrowVisual GhostArrow;
             public Transform FarRoot;
             public Transform NearRoot;
             public LineRenderer FarLines;
@@ -45,6 +46,8 @@ namespace ThreeOS
                 _hands[h] = new HandViz
                 {
                     Arrow = ThreeOSArrowVisual.Create($"3OS_VoodooDragArrow_{(h == 0 ? "L" : "R")}", 0.008f),
+                    GhostArrow = ThreeOSArrowVisual.Create(
+                        $"3OS_GhostDragArrow_{(h == 0 ? "L" : "R")}", 0.008f),
                     FarRoot = CreateWireBox($"3OS_VoodooFarBB_{(h == 0 ? "L" : "R")}", FarWire, out var farLr),
                     NearRoot = CreateWireBox($"3OS_VoodooNearBB_{(h == 0 ? "L" : "R")}", NearWire, out var nearLr),
                 };
@@ -67,9 +70,12 @@ namespace ThreeOS
                 return;
             }
 
+            var snapArmed = _bridge.TryGetSnap(out var snap) && snap.pending != 0;
+
             for (uint h = 0; h < 2; h++)
             {
                 UpdateHand(h);
+                UpdateGhostDragSticks(h, _hands[h], snapArmed);
             }
 
             UpdatePortals();
@@ -115,7 +121,16 @@ namespace ThreeOS
                 viz.NearRoot.gameObject.SetActive(false);
             }
 
-            UpdateYellowArrow(hand, viz);
+            // Ghost-drag velocity sticks are drawn in UpdateGhostDragSticks.
+            if (!_bridge.GhostDragActive(hand))
+            {
+                UpdateYellowArrow(hand, viz);
+            }
+            else
+            {
+                viz.Arrow?.Hide();
+            }
+
             UpdateSnapDots(hand, viz, session.mode == (uint)VoodooMode.Snap && dragging);
             return true;
         }
@@ -176,7 +191,7 @@ namespace ThreeOS
 
                 var t = viz.SnapDots[i];
                 t.position = InteropStructs.OpenXrToUnityPosition(node.worldPosition.ToVector3());
-                // Visual only — kernel snap radius (gravity) stays unchanged.
+                // Visual only ΓÇö kernel snap radius (gravity) stays unchanged.
                 var r = Mathf.Max(0.01f, node.radiusM);
                 var scale = (node.snapped != 0 ? r * 2.4f : r * 2f) / 3f;
                 t.localScale = Vector3.one * scale;
@@ -252,18 +267,67 @@ namespace ThreeOS
                 return;
             }
 
+            DrawVelocityArrow(viz.Arrow, arrow, new Color(1f, 0.85f, 0.15f, 0.95f),
+                new Color(1f, 0.9f, 0.2f, 0.25f), new Color(1f, 0.92f, 0.35f, 0.75f));
+        }
+
+        private void UpdateBlueGhostArrow(uint hand, HandViz viz)
+        {
+            if (viz.GhostArrow == null || !_bridge.TryGetGhostDragArrow(hand, out var arrow) ||
+                arrow.active == 0)
+            {
+                viz.GhostArrow?.Hide();
+                return;
+            }
+
+            DrawVelocityArrow(viz.GhostArrow, arrow, new Color(0.35f, 0.75f, 1f, 0.95f),
+                new Color(0.4f, 0.8f, 1f, 0.25f), new Color(0.55f, 0.88f, 1f, 0.75f));
+        }
+
+        private static void DrawVelocityArrow(ThreeOSArrowVisual visual, InteropVoodooDragArrow arrow,
+            Color shaft, Color deadzoneSphere, Color deadzoneGhost)
+        {
             var from = InteropStructs.OpenXrToUnityPosition(arrow.rayOrigin.ToVector3());
             var to = InteropStructs.OpenXrToUnityPosition(arrow.rayTip.ToVector3());
-            var yellow = new Color(1f, 0.85f, 0.15f, 0.95f);
             if (arrow.deadzoneArmed != 0 && arrow.inDeadzone != 0)
             {
-                var sphere = new Color(1f, 0.9f, 0.2f, 0.25f);
-                var ghost = new Color(1f, 0.92f, 0.35f, 0.75f);
-                viz.Arrow.SetDeadzone(from, to, sphere, ghost, DeadzoneM * 2f);
+                visual.SetDeadzone(from, to, deadzoneSphere, deadzoneGhost, DeadzoneM * 2f);
             }
             else
             {
-                viz.Arrow.Set(from, to, yellow);
+                visual.Set(from, to, shaft);
+            }
+        }
+
+        /// <summary>
+        /// Ghost-drag velocity sticks: none on direct grab; static snap arrow is separate.
+        /// Near BB: blue (near) + yellow (far). Outside near BB: yellow far only.
+        /// </summary>
+        private void UpdateGhostDragSticks(uint hand, HandViz viz, bool snapArmed)
+        {
+            viz.GhostArrow?.Hide();
+            if (!_bridge.GhostDragActive(hand))
+            {
+                return;
+            }
+
+            if (snapArmed || !_bridge.TryGetGhostDragArrow(hand, out var policy))
+            {
+                viz.Arrow?.Hide();
+                return;
+            }
+
+            // reserved1 = direct_follow, reserved2 = near_stick_visible (kernel ABI).
+            if (policy.reserved1 != 0)
+            {
+                viz.Arrow?.Hide();
+                return;
+            }
+
+            UpdateYellowArrow(hand, viz);
+            if (policy.reserved2 != 0)
+            {
+                UpdateBlueGhostArrow(hand, viz);
             }
         }
 
@@ -293,6 +357,7 @@ namespace ThreeOS
             }
 
             viz.Arrow?.Hide();
+            viz.GhostArrow?.Hide();
             HideSnapDots(viz);
             if (viz.FarRoot != null)
             {
@@ -348,7 +413,7 @@ namespace ThreeOS
             p[i++] = new Vector3(half.x, half.y, half.z);
             p[i++] = new Vector3(-half.x, half.y, half.z);
             p[i++] = new Vector3(-half.x, half.y, -half.z);
-            // Drop missing verticals: BR bottom←top, then FR, then BL already done
+            // Drop missing verticals: BR bottomΓåÉtop, then FR, then BL already done
             p[i++] = new Vector3(half.x, half.y, -half.z);
             p[i++] = new Vector3(half.x, -half.y, -half.z);
             p[i++] = new Vector3(half.x, -half.y, half.z);

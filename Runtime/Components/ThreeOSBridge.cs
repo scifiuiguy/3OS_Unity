@@ -159,6 +159,9 @@ namespace ThreeOS
         private static extern int threeos_storage_try_commit_insert();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_insert_into(ulong objectId, ulong boxId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_storage_ack_event(int success);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
@@ -301,6 +304,31 @@ namespace ThreeOS
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint threeos_voodoo_point_in_near_bb(float x, float y, float z);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern ulong threeos_voodoo_portal_at_near_point(float x, float y, float z);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern ulong threeos_voodoo_portal_for_ghost(ulong entityId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_ghost_drag_begin(uint hand, ulong entityId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_ghost_drag_end(uint hand, uint releaseInsideNearBb);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_voodoo_ghost_drag_active(uint hand);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern ulong threeos_voodoo_ghost_drag_entity(uint hand);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_get_ghost_drag_arrow(uint hand,
+            out InteropVoodooDragArrow outArrow);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_summon(ulong entityId, float x, float y, float z);
 
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
@@ -654,6 +682,46 @@ namespace ThreeOS
             IsLoaded && NativeAbiVersion >= 6 &&
             threeos_voodoo_point_in_near_bb(openXrPoint.x, openXrPoint.y, openXrPoint.z) != 0;
 
+        public ulong PortalAtNearPoint(Vector3 openXrPoint) =>
+            IsLoaded && NativeAbiVersion >= 6
+                ? threeos_voodoo_portal_at_near_point(openXrPoint.x, openXrPoint.y, openXrPoint.z)
+                : 0UL;
+
+        public ulong PortalForGhost(ulong entityId) =>
+            IsLoaded && NativeAbiVersion >= 6 ? threeos_voodoo_portal_for_ghost(entityId) : 0UL;
+
+        public bool GhostDragBegin(uint hand, ulong entityId) =>
+            IsLoaded && NativeAbiVersion >= 6 &&
+            Call(() => threeos_voodoo_ghost_drag_begin(hand, entityId));
+
+        public bool GhostDragEnd(uint hand, bool releaseInsideNearBb) =>
+            IsLoaded && NativeAbiVersion >= 6 &&
+            Call(() => threeos_voodoo_ghost_drag_end(hand, releaseInsideNearBb ? 1u : 0u));
+
+        public bool GhostDragActive(uint hand) =>
+            IsLoaded && NativeAbiVersion >= 6 && threeos_voodoo_ghost_drag_active(hand) != 0;
+
+        public ulong GhostDragEntity(uint hand) =>
+            IsLoaded && NativeAbiVersion >= 6 ? threeos_voodoo_ghost_drag_entity(hand) : 0UL;
+
+        public bool TryGetGhostDragArrow(uint hand, out InteropVoodooDragArrow arrow)
+        {
+            arrow = default;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_voodoo_get_ghost_drag_arrow(hand, out arrow);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool VoodooSummon(ulong entityId, Vector3 openXrPoint) =>
+            IsLoaded && NativeAbiVersion >= 6 &&
+            Call(() => threeos_voodoo_summon(entityId, openXrPoint.x, openXrPoint.y, openXrPoint.z));
+
         public bool SetScale(float worldToProxyRatio) =>
             Call(() => threeos_topology_set_scale(worldToProxyRatio));
 
@@ -988,6 +1056,9 @@ namespace ThreeOS
         }
 
         public bool TryCommitInsert() => Call(threeos_storage_try_commit_insert);
+
+        public bool InsertInto(ulong objectId, ulong boxId) =>
+            Call(() => threeos_storage_insert_into(objectId, boxId));
 
         public bool AckStorageEvent(bool success) =>
             Call(() => threeos_storage_ack_event(success ? 1 : 0));

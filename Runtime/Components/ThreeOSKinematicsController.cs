@@ -169,7 +169,8 @@ namespace ThreeOS
                 return;
             }
 
-            if (!_bridge.TryGetStickDebug(out var dbg) || dbg.active == 0)
+            if (AnyGhostDragActive() ||
+                !_bridge.TryGetStickDebug(out var dbg) || dbg.active == 0)
             {
                 HideStickRay();
                 return;
@@ -194,6 +195,16 @@ namespace ThreeOS
         private void HideStickRay()
         {
             _stickArrow?.Hide();
+        }
+
+        private bool AnyGhostDragActive()
+        {
+            if (_bridge == null || !_bridge.IsLoaded || _bridge.NativeAbiVersion < 6)
+            {
+                return false;
+            }
+
+            return _bridge.GhostDragActive(0) || _bridge.GhostDragActive(1);
         }
 
         private static ThreeOSPose AimPose(InteropInputFrame frame)
