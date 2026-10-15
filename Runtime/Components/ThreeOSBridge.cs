@@ -330,6 +330,21 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_voodoo_summon(ulong entityId, float x, float y, float z);
 
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_cut_arm(ulong portalId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void threeos_voodoo_cut_cancel();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern ulong threeos_voodoo_cut_portal();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_cut_paste_at(float x, float y, float z);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_cut_paste_into(ulong boxId);
+
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
         public uint NativeVersion { get; private set; }
@@ -721,6 +736,27 @@ namespace ThreeOS
         public bool VoodooSummon(ulong entityId, Vector3 openXrPoint) =>
             IsLoaded && NativeAbiVersion >= 6 &&
             Call(() => threeos_voodoo_summon(entityId, openXrPoint.x, openXrPoint.y, openXrPoint.z));
+
+        public bool VoodooCutArm(ulong portalId) =>
+            IsLoaded && NativeAbiVersion >= 6 && Call(() => threeos_voodoo_cut_arm(portalId));
+
+        public void VoodooCutCancel()
+        {
+            if (IsLoaded && NativeAbiVersion >= 6)
+            {
+                threeos_voodoo_cut_cancel();
+            }
+        }
+
+        public ulong VoodooCutPortal =>
+            IsLoaded && NativeAbiVersion >= 6 ? threeos_voodoo_cut_portal() : 0UL;
+
+        public bool VoodooCutPasteAt(Vector3 openXrPoint) =>
+            IsLoaded && NativeAbiVersion >= 6 &&
+            Call(() => threeos_voodoo_cut_paste_at(openXrPoint.x, openXrPoint.y, openXrPoint.z));
+
+        public bool VoodooCutPasteInto(ulong boxId) =>
+            IsLoaded && NativeAbiVersion >= 6 && Call(() => threeos_voodoo_cut_paste_into(boxId));
 
         public bool SetScale(float worldToProxyRatio) =>
             Call(() => threeos_topology_set_scale(worldToProxyRatio));
