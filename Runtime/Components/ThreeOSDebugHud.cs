@@ -167,6 +167,7 @@ namespace ThreeOS
             if ((flags & (uint)InteractionIntentFlags.DragActive) != 0) parts.Add("Drag");
             if ((flags & (uint)InteractionIntentFlags.VoodooSnap) != 0) parts.Add("Snap");
             if ((flags & (uint)InteractionIntentFlags.VoodooFree) != 0) parts.Add("Free");
+            if ((flags & (uint)InteractionIntentFlags.MindPalaceMenu) != 0) parts.Add("MindPalace");
             if ((flags & (uint)InteractionIntentFlags.PrimaryHeld) != 0) parts.Add("P1");
             if ((flags & (uint)InteractionIntentFlags.SecondaryHeld) != 0) parts.Add("P2");
             return parts.Count > 0 ? string.Join("+", parts) : $"0x{flags:X}";

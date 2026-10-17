@@ -30,6 +30,9 @@ namespace ThreeOS
         public const int VoodooSnapNodeBytes = 48;
         public const int VoodooPortalBytes = 200;
         public const int VoodooGhostBytes = 88;
+        public const int MultiChoiceSlotBytes = 40;
+        public const int MultiChoiceStateBytes = 528;
+        public const int DriveRootBytes = 40;
 
         public static void AssertLayout()
         {
@@ -53,6 +56,9 @@ namespace ThreeOS
             var voodooSnapNodeSize = Marshal.SizeOf<InteropVoodooSnapNode>();
             var voodooPortalSize = Marshal.SizeOf<InteropVoodooPortal>();
             var voodooGhostSize = Marshal.SizeOf<InteropVoodooGhost>();
+            var mcSlotSize = Marshal.SizeOf<InteropMultiChoiceSlot>();
+            var mcStateSize = Marshal.SizeOf<InteropMultiChoiceState>();
+            var driveRootSize = Marshal.SizeOf<InteropDriveRoot>();
             Debug.Assert(inputSize == InputFrameBytes, $"InteropInputFrame size {inputSize} != {InputFrameBytes}");
             Debug.Assert(deltaSize == TransformDeltaBytes, $"InteropTransformDelta size {deltaSize} != {TransformDeltaBytes}");
             Debug.Assert(domeSize == DomeStateBytes, $"InteropDomeState size {domeSize} != {DomeStateBytes}");
@@ -73,6 +79,9 @@ namespace ThreeOS
             Debug.Assert(voodooSnapNodeSize == VoodooSnapNodeBytes, $"InteropVoodooSnapNode size {voodooSnapNodeSize} != {VoodooSnapNodeBytes}");
             Debug.Assert(voodooPortalSize == VoodooPortalBytes, $"InteropVoodooPortal size {voodooPortalSize} != {VoodooPortalBytes}");
             Debug.Assert(voodooGhostSize == VoodooGhostBytes, $"InteropVoodooGhost size {voodooGhostSize} != {VoodooGhostBytes}");
+            Debug.Assert(mcSlotSize == MultiChoiceSlotBytes, $"InteropMultiChoiceSlot size {mcSlotSize} != {MultiChoiceSlotBytes}");
+            Debug.Assert(mcStateSize == MultiChoiceStateBytes, $"InteropMultiChoiceState size {mcStateSize} != {MultiChoiceStateBytes}");
+            Debug.Assert(driveRootSize == DriveRootBytes, $"InteropDriveRoot size {driveRootSize} != {DriveRootBytes}");
         }
 
         /// <summary>Unity left-handed Y-up → OpenXR right-handed Y-up.</summary>
@@ -212,6 +221,32 @@ namespace ThreeOS
         SecondaryHeld = 1 << 4,
         TernaryHeld = 1 << 5,
         VoodooFree = 1 << 6,
+        MindPalaceMenu = 1 << 7,
+    }
+
+    public enum MultiChoiceMode : uint
+    {
+        Closed = 0,
+        DrivePicker = 1,
+        FolderContext = 2,
+    }
+
+    public enum MultiChoiceSlotKind : uint
+    {
+        Empty = 0,
+        DriveRoot = 1,
+        FavoriteBox = 2,
+        ActionFavorite = 3,
+        ConfirmAdd = 4,
+        ConfirmJump = 5,
+    }
+
+    public enum MultiChoiceAction : uint
+    {
+        None = 0,
+        Add = 1,
+        JumpToRoot = 2,
+        ToggleFavorite = 3,
     }
 
     public enum VoodooMode : uint
@@ -283,7 +318,7 @@ namespace ThreeOS
     public enum CentroidKind : uint
     {
         None = 0,
-        God = 1,
+        MindPalace = 1,
         Box = 2,
         Temporary = 3,
     }
@@ -553,5 +588,74 @@ namespace ThreeOS
 
         public string SourceRel => sourceRel ?? string.Empty;
         public string DestRel => destRel ?? string.Empty;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4, CharSet = CharSet.Ansi)]
+    public struct InteropMultiChoiceSlot
+    {
+        public uint kind;
+        public uint enabled;
+        public ulong targetId;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 24)]
+        public string label;
+        public string Label => label ?? string.Empty;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4, CharSet = CharSet.Ansi)]
+    public struct InteropMultiChoiceState
+    {
+        public uint open;
+        public uint mode;
+        public uint section;
+        public uint hand;
+        public ThreeOSPose center;
+        public float minRadiusM;
+        public float maxRadiusM;
+        public int hoveredSlot;
+        public uint pageIndex;
+        public uint pageBackEnabled;
+        public uint pageForwardEnabled;
+        public uint confirmOpen;
+        public int confirmHovered;
+        public uint reserved0;
+        public ThreeOSPose confirmCenter;
+        public float confirmMinM;
+        public float confirmMaxM;
+        public uint reserved1;
+        public ulong contextBoxId;
+        public ulong pendingTargetId;
+        public uint pendingKind;
+        public uint cursorInside;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string title;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string hoverLabel;
+        public InteropMultiChoiceSlot slot0;
+        public InteropMultiChoiceSlot slot1;
+        public InteropMultiChoiceSlot slot2;
+        public InteropMultiChoiceSlot slot3;
+        public InteropMultiChoiceSlot slot4;
+        public InteropMultiChoiceSlot slot5;
+        public InteropMultiChoiceSlot slot6;
+        public InteropMultiChoiceSlot slot7;
+
+        public string Title => title ?? string.Empty;
+        public string HoverLabel => hoverLabel ?? string.Empty;
+
+        public InteropMultiChoiceSlot SlotAt(int i) => i switch
+        {
+            0 => slot0, 1 => slot1, 2 => slot2, 3 => slot3,
+            4 => slot4, 5 => slot5, 6 => slot6, 7 => slot7,
+            _ => default
+        };
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4, CharSet = CharSet.Ansi)]
+    public struct InteropDriveRoot
+    {
+        public ulong id;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string name;
+        public string Name => name ?? string.Empty;
     }
 }

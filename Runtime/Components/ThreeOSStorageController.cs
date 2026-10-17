@@ -8,7 +8,7 @@ using UnityEngine.Networking;
 namespace ThreeOS
 {
     /// <summary>
-    /// Demo workspace host: dual-god load, glyph views, trigger select/drag, snap-insert,
+    /// Demo workspace host: dual-mind-palace load, glyph views, trigger select/drag, snap-insert,
     /// portal/expanded dismiss chrome, write-through FS cut.
     /// </summary>
     [DefaultExecutionOrder(0)]
@@ -16,9 +16,9 @@ namespace ThreeOS
     {
         public const string DemoFolderName = "3OS_Demo";
         public const string DemoFolderName2 = "3OS_Demo2";
-        public const float GodFixtureRangeM = 10f * 0.3048f;
-        public const float GodFixtureHeightM = 2.5f * 0.3048f;
-        public const float GodFixtureAzimuthDeg = 15f;
+        public const float MindPalaceFixtureRangeM = 10f * 0.3048f;
+        public const float MindPalaceFixtureHeightM = 2.5f * 0.3048f;
+        public const float MindPalaceFixtureAzimuthDeg = 15f;
         public const float GlyphSizeM = 0.1f;
         public const float DismissXDiameterM = 0.06f;
         public float PossessDistance = 0.45f;
@@ -40,6 +40,7 @@ namespace ThreeOS
         private ThreeOSStorageWriteThrough _fs;
         private ThreeOSExpandedBoxController _expanded;
         private ThreeOSStorageInteraction _interaction;
+        private ThreeOSMultiChoiceHost _multiChoice;
 
         private readonly HashSet<ulong> _animLockedIds = new HashSet<ulong>();
         private ThreeOSArrowVisual _insertArrow;
@@ -134,6 +135,7 @@ namespace ThreeOS
             _fs = new ThreeOSStorageWriteThrough(this);
             _expanded = new ThreeOSExpandedBoxController(this);
             _interaction = new ThreeOSStorageInteraction(this);
+            _multiChoice = new ThreeOSMultiChoiceHost(this);
 
             _insertArrow = ThreeOSArrowVisual.Create("3OS_InsertArrow", 0.01f);
             if (GetComponent<ThreeOSVoodooController>() == null)
@@ -164,7 +166,7 @@ namespace ThreeOS
                 DemoFolderName, DemoSeedPolicy.RequireContent, null,
                 r => _demoRoot = r, s => _status = s);
             yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
-                DemoFolderName2, DemoSeedPolicy.SoftSeedGodMarker, _demoRoot,
+                DemoFolderName2, DemoSeedPolicy.SoftSeedMindPalaceMarker, _demoRoot,
                 r => _demoRoot2 = r, s => _status = s);
             if (string.IsNullOrEmpty(_demoRoot))
             {
@@ -174,9 +176,9 @@ namespace ThreeOS
 
             HideNonGlyphMovables();
             yield return WaitForHeadPose();
-            if (!LoadDualGodFixture(_layoutHeadPose))
+            if (!LoadDualMindPalaceFixture(_layoutHeadPose))
             {
-                Debug.LogError($"[3OS] dual-god load aborted: {_status}");
+                Debug.LogError($"[3OS] dual-mind-palace load aborted: {_status}");
                 yield break;
             }
 
@@ -185,7 +187,7 @@ namespace ThreeOS
                       FindFirstObjectByType<ThreeOSKinematicsController>();
             kin?.PushKinematicsParams();
             RebuildViews();
-            _status = $"demo {_glyphs.Views.Count} glyphs dual-god @ {ThreeOSStorageWriteThrough.ShortPath(_demoRoot)}";
+            _status = $"demo {_glyphs.Views.Count} glyphs dual-mind-palace @ {ThreeOSStorageWriteThrough.ShortPath(_demoRoot)}";
             Debug.Log(
                 $"[3OS] demo loaded views={_glyphs.Views.Count} kernelItems={_bridge.StorageItemCount()} root={_demoRoot}");
 
@@ -273,6 +275,7 @@ namespace ThreeOS
             _glyphs.SyncGhostViewsFromKernel();
             _dismiss.UpdateExpandedDismissAffordances();
             _dismiss.UpdatePortalDismissAffordances();
+            _multiChoice?.Tick();
             _interaction.HandleTriggerSelectAndDrag();
             _glyphs.SyncSelectionMaterials();
             _interaction.UpdateInsertArrow();
@@ -310,7 +313,8 @@ namespace ThreeOS
             if (installed < 3)
             {
                 foreach (var fileName in new[]
-                         { "box.3glyph", "box_open.3glyph", "gltf_mark.3glyph", "scissors.3glyph" })
+                         { "box.3glyph", "box_open.3glyph", "gltf_mark.3glyph", "scissors.3glyph",
+                           "heart.3glyph", "heart_filled.3glyph", "arrow.3glyph" })
                 {
                     var url = Path.Combine(Application.streamingAssetsPath, "3OS", "glyphs", fileName);
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -355,32 +359,32 @@ namespace ThreeOS
                     $"[3OS] only {installed}/3 glyph packs installed — continuing with procedural glyphs");
         }
 
-        private bool LoadDualGodFixture(ThreeOSPose head)
+        private bool LoadDualMindPalaceFixture(ThreeOSPose head)
         {
             _bridge.StorageClear();
-            _bridge.GodClear();
-            var leftAnchor = GodFixturePose(head, -GodFixtureAzimuthDeg);
-            var rightAnchor = GodFixturePose(head, GodFixtureAzimuthDeg);
-            if (!_bridge.TryRegisterGod(DemoFolderName, leftAnchor, out var godL) ||
-                !_bridge.TryRegisterGod(DemoFolderName2, rightAnchor, out var godR))
+            _bridge.MindPalaceClear();
+            var leftAnchor = MindPalaceFixturePose(head, -MindPalaceFixtureAzimuthDeg);
+            var rightAnchor = MindPalaceFixturePose(head, MindPalaceFixtureAzimuthDeg);
+            if (!_bridge.TryRegisterMindPalace(DemoFolderName, leftAnchor, out var mpL) ||
+                !_bridge.TryRegisterMindPalace(DemoFolderName2, rightAnchor, out var mpR))
             {
-                _status = $"god register failed: {_bridge.LastError}";
+                _status = $"mind palace register failed: {_bridge.LastError}";
                 return false;
             }
-            if (!LoadDemoDirectory(_demoRoot, godL, clearFirst: false))
+            if (!LoadDemoDirectory(_demoRoot, mpL, clearFirst: false))
                 return false;
             if (string.IsNullOrEmpty(_demoRoot2) ||
-                !LoadDemoDirectory(_demoRoot2, godR, clearFirst: false))
-                Debug.LogWarning($"[3OS] Demo2 load weak: {_status} — continuing with god L only");
-            if (!_bridge.LayoutGod(godL, leftAnchor))
-                Debug.LogWarning($"[3OS] layout god L: {_bridge.LastError}");
-            if (!_bridge.LayoutGod(godR, rightAnchor))
-                Debug.LogWarning($"[3OS] layout god R: {_bridge.LastError}");
-            Debug.Log($"[3OS] dual-god fixture L={godL} R={godR}");
+                !LoadDemoDirectory(_demoRoot2, mpR, clearFirst: false))
+                Debug.LogWarning($"[3OS] Demo2 load weak: {_status} — continuing with MindPalace L only");
+            if (!_bridge.LayoutMindPalace(mpL, leftAnchor))
+                Debug.LogWarning($"[3OS] layout MindPalace L: {_bridge.LastError}");
+            if (!_bridge.LayoutMindPalace(mpR, rightAnchor))
+                Debug.LogWarning($"[3OS] layout MindPalace R: {_bridge.LastError}");
+            Debug.Log($"[3OS] dual-mind-palace fixture L={mpL} R={mpR}");
             return true;
         }
 
-        private static ThreeOSPose GodFixturePose(ThreeOSPose head, float azimuthDeg)
+        private static ThreeOSPose MindPalaceFixturePose(ThreeOSPose head, float azimuthDeg)
         {
             var q = new Quaternion(head.orientation.x, head.orientation.y, head.orientation.z,
                 head.orientation.w);
@@ -393,9 +397,9 @@ namespace ThreeOS
             var rad = azimuthDeg * Mathf.Deg2Rad;
             var dir = (Mathf.Cos(rad) * fwd + Mathf.Sin(rad) * right).normalized;
             var pos = new Vector3(
-                head.position.x + dir.x * GodFixtureRangeM,
-                head.position.y + GodFixtureHeightM,
-                head.position.z + dir.z * GodFixtureRangeM);
+                head.position.x + dir.x * MindPalaceFixtureRangeM,
+                head.position.y + MindPalaceFixtureHeightM,
+                head.position.z + dir.z * MindPalaceFixtureRangeM);
             var face = -dir;
             var yaw = Mathf.Atan2(face.x, -face.z);
             var half = yaw * 0.5f;
@@ -410,9 +414,12 @@ namespace ThreeOS
         }
 
         private bool LoadDemoDirectory(string root) =>
-            LoadDemoDirectory(root, godRootId: 0, clearFirst: true);
+            LoadDemoDirectory(root, mindPalaceId: 0, clearFirst: true);
 
-        private bool LoadDemoDirectory(string root, ulong godRootId, bool clearFirst)
+        internal bool LoadDemoDirectoryPublic(string root, ulong mindPalaceId, bool clearFirst) =>
+            LoadDemoDirectory(root, mindPalaceId, clearFirst);
+
+        private bool LoadDemoDirectory(string root, ulong mindPalaceId, bool clearFirst)
         {
             if (clearFirst)
                 _bridge.StorageClear();
@@ -460,8 +467,8 @@ namespace ThreeOS
                         Debug.LogError($"[3OS] {_status}");
                         return false;
                     }
-                    if (godRootId != 0 && !_bridge.SetGodRoot(eid, godRootId))
-                        Debug.LogWarning($"[3OS] set god root failed: {_bridge.LastError}");
+                    if (mindPalaceId != 0 && !_bridge.SetMindPalaceRoot(eid, mindPalaceId))
+                        Debug.LogWarning($"[3OS] set MindPalace failed: {_bridge.LastError}");
                     added++;
                 }
                 foreach (var name in dirs)
@@ -474,8 +481,8 @@ namespace ThreeOS
                         Debug.LogError($"[3OS] {_status}");
                         return false;
                     }
-                    if (godRootId != 0 && !_bridge.SetGodRoot(bid, godRootId))
-                        Debug.LogWarning($"[3OS] set god root failed: {_bridge.LastError}");
+                    if (mindPalaceId != 0 && !_bridge.SetMindPalaceRoot(bid, mindPalaceId))
+                        Debug.LogWarning($"[3OS] set MindPalace failed: {_bridge.LastError}");
                     added++;
                     boxes++;
                 }

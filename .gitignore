@@ -34,3 +34,6 @@ Thumbs.db
 
 # Local editor logs
 *.log
+
+# Large Asset Store packs — never commit into the SDK package
+**/UnityJapanOffice/

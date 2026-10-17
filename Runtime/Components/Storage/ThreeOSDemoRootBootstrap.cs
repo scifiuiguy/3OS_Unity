@@ -9,7 +9,7 @@ namespace ThreeOS
     internal enum DemoSeedPolicy
     {
         RequireContent,
-        SoftSeedGodMarker
+        SoftSeedMindPalaceMarker
     }
 
     internal static class ThreeOSDemoRootBootstrap

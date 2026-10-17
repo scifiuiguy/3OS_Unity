@@ -327,6 +327,18 @@ namespace ThreeOS
                     return;
                 }
 
+                // Near-field selection (post-summon or matrix real): open-air empty
+                // pinch deselects. Do not re-summon to the pinch — that left selection
+                // permanently sticky because every miss called summon again.
+                if (homePortal == 0 && portalAtPinch == 0)
+                {
+                    _bridge.ClearSelection();
+                    _selectionLabel = "none";
+                    _status = "Sel:none";
+                    _lastShortTapId = 0;
+                    return;
+                }
+
                 // Ghost outside / cross-portal, or near-real into a BB → summon/insert + lerp.
                 if (_bridge.VoodooSummon(selectedId, pinchXr))
                 {

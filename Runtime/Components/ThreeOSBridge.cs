@@ -244,22 +244,22 @@ namespace ThreeOS
         private static extern uint threeos_sizeof_centroid();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
-        private static extern void threeos_god_clear();
+        private static extern void threeos_mind_palace_clear();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
-        private static extern int threeos_god_register(
+        private static extern int threeos_mind_palace_register(
             [MarshalAs(UnmanagedType.LPStr)] string name,
             ref ThreeOSPose anchor,
-            out ulong outGodId);
+            out ulong outMindPalaceId);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
-        private static extern int threeos_god_set_anchor(ulong godId, ref ThreeOSPose anchor);
+        private static extern int threeos_mind_palace_set_anchor(ulong mindPalaceId, ref ThreeOSPose anchor);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
-        private static extern int threeos_storage_set_god_root(ulong entityId, ulong godRootId);
+        private static extern int threeos_storage_set_mind_palace(ulong entityId, ulong mindPalaceId);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
-        private static extern int threeos_storage_layout_god(ulong godRootId, ref ThreeOSPose center);
+        private static extern int threeos_storage_layout_mind_palace(ulong mindPalaceId, ref ThreeOSPose center);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint threeos_centroid_count();
@@ -345,6 +345,58 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_voodoo_cut_paste_into(ulong boxId);
 
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_multi_choice_state();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_multi_choice_slot();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_sizeof_drive_root();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_drive_roots_set(
+            [In] InteropDriveRoot[] roots, uint count);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_favorite_set(ulong boxId, uint favored);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_favorite_get(ulong boxId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multichoice_open_drive(uint hand, ref ThreeOSPose center);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multichoice_open_folder(uint hand, ref ThreeOSPose center,
+            ulong boxId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void threeos_multichoice_close();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multichoice_tick(float cursorX, float cursorY, float cursorZ);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multichoice_confirm();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multichoice_get_state(out InteropMultiChoiceState outState);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multichoice_poll_action(out uint outAction,
+            out ulong outTargetId, out uint outKind);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_mind_palace_layout_next(ulong mindPalaceId, ref ThreeOSPose head,
+            [MarshalAs(UnmanagedType.LPStr)] string displayName);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_storage_clear_field();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_field_resolve_overlaps(ref ThreeOSPose head);
+
         public bool IsLoaded { get; private set; }
         public string LastError { get; private set; } = string.Empty;
         public uint NativeVersion { get; private set; }
@@ -427,9 +479,12 @@ namespace ThreeOS
                         threeos_sizeof_centroid() != InteropStructs.CentroidBytes ||
                         threeos_sizeof_voodoo_snap_node() != InteropStructs.VoodooSnapNodeBytes ||
                         threeos_sizeof_voodoo_portal() != InteropStructs.VoodooPortalBytes ||
-                        threeos_sizeof_voodoo_ghost() != InteropStructs.VoodooGhostBytes)
+                        threeos_sizeof_voodoo_ghost() != InteropStructs.VoodooGhostBytes ||
+                        threeos_sizeof_multi_choice_state() != InteropStructs.MultiChoiceStateBytes ||
+                        threeos_sizeof_multi_choice_slot() != InteropStructs.MultiChoiceSlotBytes ||
+                        threeos_sizeof_drive_root() != InteropStructs.DriveRootBytes)
                     {
-                        LastError = "Voodoo/centroid/portal ABI size mismatch";
+                        LastError = "Voodoo/centroid/portal/multichoice ABI size mismatch";
                         IsLoaded = false;
                         Debug.LogError($"[3OS] {LastError}");
                         return;
@@ -590,20 +645,20 @@ namespace ThreeOS
             IsLoaded && NativeAbiVersion >= 6 &&
             Call(() => threeos_voodoo_set_field_params(ref parameters));
 
-        public void GodClear()
+        public void MindPalaceClear()
         {
             if (!IsLoaded || NativeAbiVersion < 6) return;
-            try { threeos_god_clear(); }
+            try { threeos_mind_palace_clear(); }
             catch (Exception ex) { LastError = ex.Message; }
         }
 
-        public bool TryRegisterGod(string name, ThreeOSPose anchor, out ulong godId)
+        public bool TryRegisterMindPalace(string name, ThreeOSPose anchor, out ulong mindPalaceId)
         {
-            godId = 0;
+            mindPalaceId = 0;
             if (!IsLoaded || NativeAbiVersion < 6) return false;
             try
             {
-                var rc = threeos_god_register(name ?? string.Empty, ref anchor, out godId);
+                var rc = threeos_mind_palace_register(name ?? string.Empty, ref anchor, out mindPalaceId);
                 if (rc != 0) { LastError = ReadLastError(); return false; }
                 LastError = string.Empty;
                 return true;
@@ -611,13 +666,13 @@ namespace ThreeOS
             catch (Exception ex) { LastError = ex.Message; return false; }
         }
 
-        public bool SetGodRoot(ulong entityId, ulong godRootId) =>
+        public bool SetMindPalaceRoot(ulong entityId, ulong mindPalaceId) =>
             IsLoaded && NativeAbiVersion >= 6 &&
-            Call(() => threeos_storage_set_god_root(entityId, godRootId));
+            Call(() => threeos_storage_set_mind_palace(entityId, mindPalaceId));
 
-        public bool LayoutGod(ulong godRootId, ThreeOSPose center) =>
+        public bool LayoutMindPalace(ulong mindPalaceId, ThreeOSPose center) =>
             IsLoaded && NativeAbiVersion >= 6 &&
-            Call(() => threeos_storage_layout_god(godRootId, ref center));
+            Call(() => threeos_storage_layout_mind_palace(mindPalaceId, ref center));
 
         public uint CentroidCount =>
             IsLoaded && NativeAbiVersion >= 6 ? threeos_centroid_count() : 0u;
@@ -1185,6 +1240,75 @@ namespace ThreeOS
             try { threeos_selection_clear(); }
             catch (Exception ex) { LastError = ex.Message; }
         }
+
+        public bool SetDriveRoots(InteropDriveRoot[] roots) =>
+            Call(() => threeos_drive_roots_set(roots ?? Array.Empty<InteropDriveRoot>(),
+                (uint)(roots?.Length ?? 0)));
+
+        public bool SetFavorite(ulong boxId, bool favored) =>
+            Call(() => threeos_favorite_set(boxId, favored ? 1u : 0u));
+
+        public bool IsFavorite(ulong boxId) =>
+            IsLoaded && NativeAbiVersion >= 6 && threeos_favorite_get(boxId) != 0;
+
+        public bool OpenMultiChoiceDrive(uint hand, ThreeOSPose center) =>
+            Call(() => threeos_multichoice_open_drive(hand, ref center));
+
+        public bool OpenMultiChoiceFolder(uint hand, ThreeOSPose center, ulong boxId) =>
+            Call(() => threeos_multichoice_open_folder(hand, ref center, boxId));
+
+        public void CloseMultiChoice()
+        {
+            if (!IsLoaded) return;
+            try { threeos_multichoice_close(); }
+            catch (Exception ex) { LastError = ex.Message; }
+        }
+
+        public bool TickMultiChoice(float x, float y, float z) =>
+            Call(() => threeos_multichoice_tick(x, y, z));
+
+        public bool ConfirmMultiChoice() => Call(threeos_multichoice_confirm);
+
+        public bool TryGetMultiChoiceState(out InteropMultiChoiceState state)
+        {
+            state = default;
+            if (!IsLoaded) return false;
+            try
+            {
+                var rc = threeos_multichoice_get_state(out state);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool PollMultiChoiceAction(out MultiChoiceAction action, out ulong targetId,
+            out MultiChoiceSlotKind kind)
+        {
+            action = MultiChoiceAction.None;
+            targetId = 0;
+            kind = MultiChoiceSlotKind.Empty;
+            if (!IsLoaded) return false;
+            try
+            {
+                var rc = threeos_multichoice_poll_action(out var a, out targetId, out var k);
+                if (rc != 0) { LastError = ReadLastError(); return false; }
+                action = (MultiChoiceAction)a;
+                kind = (MultiChoiceSlotKind)k;
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public bool MindPalaceLayoutNext(ulong mindPalaceId, ThreeOSPose head, string displayName) =>
+            Call(() => threeos_mind_palace_layout_next(mindPalaceId, ref head, displayName ?? string.Empty));
+
+        public bool StorageClearField() => Call(threeos_storage_clear_field);
+
+        public bool FieldResolveOverlaps(ThreeOSPose head) =>
+            Call(() => threeos_field_resolve_overlaps(ref head));
 
         public static string FormatVersion(uint packed)
         {
