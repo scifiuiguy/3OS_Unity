@@ -18,11 +18,14 @@ namespace ThreeOS
     [DefaultExecutionOrder(-100)]
     public sealed class ThreeOSInputRouter : MonoBehaviour
     {
-        public const float CursorBaseDiameterM = 0.015f; // 50% of prior 0.03m
+        // ~3cm — readable in MR office; prior 1.5cm was easy to miss without ghost hands.
+        public const float CursorBaseDiameterM = 0.03f;
 
         private ThreeOSBridge _bridge;
         private ThreeOSStorageController _storage;
         private Transform _headTransform;
+        /// <summary>XR Origin playspace — Input System XR device poses are tracking-local.</summary>
+        private Transform _playspace;
         private static readonly Color CursorWhite = Color.white;
         private static readonly Color CursorNearBlue = new Color(0.4f, 0.85f, 1f, 1f);
 
@@ -123,6 +126,7 @@ namespace ThreeOS
                 if (Camera.main != null)
                 {
                     _headTransform = Camera.main.transform;
+                    _playspace = null; // re-walk Camera → XR Origin
                 }
             }
 
@@ -203,8 +207,8 @@ namespace ThreeOS
                 }
             }
 
-            UpdateCursorVisual(_leftCursor, _leftCursorMat, LastLeftCursor);
-            UpdateCursorVisual(_rightCursor, _rightCursorMat, LastRightCursor);
+            UpdateCursorVisual(_leftCursor, _leftCursorMat, LastLeftCursor, frame, isLeft: true);
+            UpdateCursorVisual(_rightCursor, _rightCursorMat, LastRightCursor, frame, isLeft: false);
         }
 
         private static void MuteHandSample(ref InteropHandSample hand)
@@ -318,7 +322,7 @@ namespace ThreeOS
             return any;
         }
 
-        private static bool FillOneHand(XRHand hand, ref InteropHandSample sample)
+        private bool FillOneHand(XRHand hand, ref InteropHandSample sample)
         {
             if (!hand.isTracked)
             {
@@ -358,7 +362,8 @@ namespace ThreeOS
             {
                 // Meta XR Hands palm joint +Y points out the *back* of the hand (dorsal).
                 // Negate so kernel gets the palmar normal: palm to floor → world −Y → Down.
-                var n = -palmPose.up;
+                var worldPalm = TrackingToWorld(palmPose.position, palmPose.rotation);
+                var n = -(worldPalm.rotation * Vector3.up);
                 sample.palmNormal = InteropStructs.UnityToOpenXrPosition(n);
                 sample.palmModeValid = 0;
             }
@@ -380,7 +385,7 @@ namespace ThreeOS
             return true;
         }
 
-        private static bool TryJointOpenXr(XRHand hand, XRHandJointID id, out ThreeOSVec3 openXr)
+        private bool TryJointOpenXr(XRHand hand, XRHandJointID id, out ThreeOSVec3 openXr)
         {
             openXr = default;
             if (!hand.GetJoint(id).TryGetPose(out var pose))
@@ -388,7 +393,9 @@ namespace ThreeOS
                 return false;
             }
 
-            openXr = InteropStructs.UnityToOpenXrPosition(pose.position);
+            // XR Hands joint poses are tracking-space (same as XRController); lift to world.
+            var world = TrackingToWorld(pose.position, pose.rotation);
+            openXr = InteropStructs.UnityToOpenXrPosition(world.position);
             return true;
         }
 
@@ -431,24 +438,38 @@ namespace ThreeOS
             return frame.head;
         }
 
-        private void UpdateCursorVisual(Transform tip, Material mat, InteropPointCursor cursor)
+        private void UpdateCursorVisual(Transform tip, Material mat, InteropPointCursor cursor,
+            InteropInputFrame frame, bool isLeft)
         {
             if (tip == null)
             {
                 return;
             }
 
-            if (cursor.active == 0)
+            ThreeOSVec3 openXrPos;
+            float scale = 1f;
+            if (cursor.active != 0)
             {
-                SetActive(tip, false);
-                return;
+                openXrPos = cursor.position;
+                scale = Mathf.Max(0.1f, cursor.scale);
+            }
+            else
+            {
+                // Fallback: controller/hand aim when kernel cursor is inactive so MR
+                // Act I still shows an aim tip (hand meshes may lag or be absent).
+                var aimFlag = isLeft ? TrackingFlags.LeftAim : TrackingFlags.RightAim;
+                if ((frame.trackingFlags & (uint)aimFlag) == 0)
+                {
+                    SetActive(tip, false);
+                    return;
+                }
+
+                openXrPos = isLeft ? frame.leftAim.position : frame.rightAim.position;
             }
 
-            var openXr = cursor.position.ToVector3();
-            var unity = InteropStructs.OpenXrToUnityPosition(openXr);
-            tip.position = unity;
-            var s = CursorBaseDiameterM * Mathf.Max(0.1f, cursor.scale);
-            tip.localScale = Vector3.one * s;
+            var openXr = openXrPos.ToVector3();
+            tip.position = InteropStructs.OpenXrToUnityPosition(openXr);
+            tip.localScale = Vector3.one * (CursorBaseDiameterM * scale);
             if (mat != null && _bridge != null && _bridge.IsLoaded)
             {
                 var inside = _bridge.PointInAnyNearBb(openXr);
@@ -500,7 +521,54 @@ namespace ThreeOS
             return go;
         }
 
-        private static void FillController(XRController controller, bool isLeft, ref InteropInputFrame frame)
+        private Transform Playspace()
+        {
+            if (_playspace != null)
+            {
+                return _playspace;
+            }
+
+            // Main Camera → Camera Offset → XR Origin (VR)
+            if (_headTransform != null)
+            {
+                var t = _headTransform;
+                while (t.parent != null)
+                {
+                    t = t.parent;
+                    if (t.name.IndexOf("XR Origin", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        _playspace = t;
+                        return _playspace;
+                    }
+                }
+            }
+
+            var go = GameObject.Find("XR Origin (VR)") ?? GameObject.Find("XR Origin");
+            if (go != null)
+            {
+                _playspace = go.transform;
+            }
+
+            return _playspace;
+        }
+
+        /// <summary>
+        /// Input System <see cref="XRController"/> device pose is tracking-space.
+        /// With a yawed/offset XR Origin (Final Demo spawn ~80°), that must be lifted
+        /// into world or voodoo stick deltas are orthogonal to head-forward rest poses.
+        /// </summary>
+        private Pose TrackingToWorld(Vector3 trackingPos, Quaternion trackingRot)
+        {
+            var space = Playspace();
+            if (space == null)
+            {
+                return new Pose(trackingPos, trackingRot);
+            }
+
+            return new Pose(space.TransformPoint(trackingPos), space.rotation * trackingRot);
+        }
+
+        private void FillController(XRController controller, bool isLeft, ref InteropInputFrame frame)
         {
             if (controller == null)
             {
@@ -524,7 +592,8 @@ namespace ThreeOS
                 return;
             }
 
-            var pose = InteropStructs.ToOpenXrPose(new Pose(pos, rot));
+            var world = TrackingToWorld(pos, rot);
+            var pose = InteropStructs.ToOpenXrPose(world);
             if (isLeft)
             {
                 frame.leftAim = pose;

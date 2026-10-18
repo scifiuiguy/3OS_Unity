@@ -229,6 +229,7 @@ namespace ThreeOS
         Closed = 0,
         DrivePicker = 1,
         FolderContext = 2,
+        Agent = 3,
     }
 
     public enum MultiChoiceSlotKind : uint
@@ -239,6 +240,8 @@ namespace ThreeOS
         ActionFavorite = 3,
         ConfirmAdd = 4,
         ConfirmJump = 5,
+        ActionSpeak = 6,
+        ActionDemoChrome = 7,
     }
 
     public enum MultiChoiceAction : uint
@@ -247,6 +250,7 @@ namespace ThreeOS
         Add = 1,
         JumpToRoot = 2,
         ToggleFavorite = 3,
+        Speak = 4,
     }
 
     public enum VoodooMode : uint
@@ -315,12 +319,24 @@ namespace ThreeOS
         public uint reserved2;
     }
 
+    /// <summary>MR enclosure solid OBB (48 bytes). Finite WorldMesh collider volume.</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropVoodooEnclosureBox
+    {
+        public ThreeOSVec3 center;
+        public ThreeOSVec3 halfExtents;
+        public ThreeOSQuat orientation;
+        public uint kind;
+        public uint pad;
+    }
+
     public enum CentroidKind : uint
     {
         None = 0,
         MindPalace = 1,
         Box = 2,
         Temporary = 3,
+        FocusAnchor = 4,
     }
 
     /// <summary>CharSet.Ansi + ByValTStr matches native char[16] (IL2CPP-safe).</summary>

@@ -1,15 +1,21 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace ThreeOS
 {
     /// <summary>
     /// Phase 0.6: dual-hand wireframe far/near voodoo BBs, yellow drag arrows, snap-mode dots.
+    /// Publishes named WorldMesh* colliders as solid enclosure OBBs before tick.
     /// </summary>
-    [DefaultExecutionOrder(210)]
+    // -150: Update publishes WorldMesh boxes before InputRouter tick (-100).
+    [DefaultExecutionOrder(-150)]
     public sealed class ThreeOSVoodooController : MonoBehaviour
     {
         private const float DeadzoneM = 0.015f;
+        private const float FarWireWidthM = 0.008f;
+        private const string WorldMeshPrefix = "WorldMesh";
+        private const int MaxEnclosureBoxes = 64;
         private static readonly Color FarWire = new Color(1f, 0.85f, 0.2f, 0.5f);
         private static readonly Color NearWire = new Color(0.4f, 0.85f, 1f, 0.5f);
         private static readonly Color SnapIdle = new Color(1f, 0.92f, 0.35f, 0.75f);
@@ -23,6 +29,10 @@ namespace ThreeOS
         private readonly List<LineRenderer> _portalFarLr = new List<LineRenderer>();
         private readonly List<Transform> _portalNear = new List<Transform>();
         private readonly List<LineRenderer> _portalNearLr = new List<LineRenderer>();
+        private readonly List<Collider> _worldMeshColliders = new List<Collider>();
+        private float _nextMeshRefresh = -1f;
+        private readonly List<InteropVoodooEnclosureBox> _boxScratch =
+            new List<InteropVoodooEnclosureBox>(MaxEnclosureBoxes);
 
         private sealed class HandViz
         {
@@ -54,12 +64,42 @@ namespace ThreeOS
                 _hands[h].FarLines = farLr;
                 _hands[h].NearLines = nearLr;
             }
+
+            // Final Demo MR: probe room AABB and flex voodoo field to room diagonal.
+            if (IsFinalDemoScene() && FindFirstObjectByType<ThreeOSMrRoomProbe>() == null)
+            {
+                var host = _bridge != null ? _bridge.gameObject : gameObject;
+                if (host.GetComponent<ThreeOSMrRoomProbe>() == null)
+                    host.AddComponent<ThreeOSMrRoomProbe>();
+            }
+        }
+
+        private static bool IsFinalDemoScene()
+        {
+            var behaviours = FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None);
+            for (var i = 0; i < behaviours.Length; i++)
+            {
+                var mb = behaviours[i];
+                if (mb != null && mb.GetType().Name == "ThreeOSFinalDemoStage")
+                    return true;
+            }
+
+            return false;
         }
 
         private void OnDestroy()
         {
             if (_matSnapIdle != null) Destroy(_matSnapIdle);
             if (_matSnapLocked != null) Destroy(_matSnapLocked);
+        }
+
+        private void Update()
+        {
+            // Before InputRouter tick (-100): publish enclosure so kernel clamps far BB
+            // during drag and on the release/park frame.
+            if (_bridge == null || !_bridge.IsLoaded || _bridge.NativeAbiVersion < 6)
+                return;
+            PublishWorldMeshBoxes();
         }
 
         private void LateUpdate()
@@ -79,6 +119,104 @@ namespace ThreeOS
             }
 
             UpdatePortals();
+        }
+
+        private void PublishWorldMeshBoxes()
+        {
+            if (Time.unscaledTime >= _nextMeshRefresh)
+            {
+                RefreshWorldMeshColliders();
+                _nextMeshRefresh = Time.unscaledTime + 1f;
+            }
+
+            _boxScratch.Clear();
+            for (var i = 0; i < _worldMeshColliders.Count; i++)
+            {
+                var col = _worldMeshColliders[i];
+                if (col == null || !col.enabled || !col.gameObject.activeInHierarchy)
+                    continue;
+                if (!TryColliderObb(col, out var center, out var half, out var rot))
+                    continue;
+
+                var oxPose = InteropStructs.ToOpenXrPose(new Pose(center, rot));
+                // Half-extents are lengths along local axes (sign flip from LH↔RH is irrelevant).
+                var oxHalf = new Vector3(Mathf.Abs(half.x), Mathf.Abs(half.y), Mathf.Abs(half.z));
+                _boxScratch.Add(new InteropVoodooEnclosureBox
+                {
+                    center = oxPose.position,
+                    halfExtents = oxHalf,
+                    orientation = oxPose.orientation,
+                    kind = 0
+                });
+                if (_boxScratch.Count >= MaxEnclosureBoxes)
+                    break;
+            }
+
+            if (_boxScratch.Count == 0)
+                _bridge.SetVoodooEnclosureBoxes(null);
+            else
+                _bridge.SetVoodooEnclosureBoxes(_boxScratch.ToArray());
+        }
+
+        private void RefreshWorldMeshColliders()
+        {
+            _worldMeshColliders.Clear();
+            var cols = FindObjectsByType<Collider>(FindObjectsSortMode.None);
+            for (var i = 0; i < cols.Length; i++)
+            {
+                var col = cols[i];
+                if (col == null)
+                    continue;
+                if (IsWorldMeshName(col.gameObject.name))
+                    _worldMeshColliders.Add(col);
+            }
+        }
+
+        /// <summary>
+        /// Any GO named WorldMesh, WorldMesh (N), WorldMesh-Ceiling, WorldMesh-Floor, etc.
+        /// </summary>
+        private static bool IsWorldMeshName(string n)
+        {
+            if (string.IsNullOrEmpty(n))
+                return false;
+            if (n == WorldMeshPrefix)
+                return true;
+            if (n.StartsWith(WorldMeshPrefix + " (", StringComparison.Ordinal) && n.EndsWith(")"))
+                return true;
+            if (n.StartsWith(WorldMeshPrefix + "-", StringComparison.Ordinal))
+                return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Finite OBB for a collider. BoxCollider keeps orientation; others use world AABB.
+        /// </summary>
+        private static bool TryColliderObb(Collider col, out Vector3 center, out Vector3 halfExtents,
+            out Quaternion rotation)
+        {
+            center = default;
+            halfExtents = default;
+            rotation = Quaternion.identity;
+            if (col is BoxCollider box)
+            {
+                var t = col.transform;
+                center = t.TransformPoint(box.center);
+                rotation = t.rotation;
+                var lossy = t.lossyScale;
+                halfExtents = new Vector3(
+                    Mathf.Abs(box.size.x * lossy.x) * 0.5f,
+                    Mathf.Abs(box.size.y * lossy.y) * 0.5f,
+                    Mathf.Abs(box.size.z * lossy.z) * 0.5f);
+            }
+            else
+            {
+                var b = col.bounds;
+                center = b.center;
+                halfExtents = b.extents;
+                rotation = Quaternion.identity;
+            }
+
+            return halfExtents.x > 1e-5f || halfExtents.y > 1e-5f || halfExtents.z > 1e-5f;
         }
 
         private bool UpdateHand(uint hand)
@@ -109,7 +247,9 @@ namespace ThreeOS
             var dragging = session.nearBb.open == 0;
             if (dragging)
             {
-                UpdateWireBox(viz.FarRoot, viz.FarLines, session.farBb);
+                // Focus-anchor lock: thicken far wire so the snap reads clearly.
+                var farWidth = IsSnappedToFocusAnchor(hand) ? FarWireWidthM * 2f : FarWireWidthM;
+                UpdateWireBox(viz.FarRoot, viz.FarLines, session.farBb, farWidth);
             }
             else if (viz.FarRoot != null)
             {
@@ -148,8 +288,8 @@ namespace ThreeOS
                     continue;
                 }
 
-                UpdateWireBox(_portalFar[i], _portalFarLr[i], portal.farBb);
-                UpdateWireBox(_portalNear[i], _portalNearLr[i], portal.nearBb);
+                UpdateWireBox(_portalFar[i], _portalFarLr[i], portal.farBb, FarWireWidthM);
+                UpdateWireBox(_portalNear[i], _portalNearLr[i], portal.nearBb, FarWireWidthM);
             }
 
             for (var i = n; i < _portalFar.Count; i++)
@@ -234,7 +374,22 @@ namespace ThreeOS
             }
         }
 
-        private void UpdateWireBox(Transform root, LineRenderer lr, InteropVoodooBoundingBox bb)
+        private bool IsSnappedToFocusAnchor(uint hand)
+        {
+            var n = (int)_bridge.VoodooSnapNodeCount(hand);
+            for (var i = 0; i < n; i++)
+            {
+                if (!_bridge.TryGetVoodooSnapNode(hand, (uint)i, out var node))
+                    continue;
+                if (node.snapped != 0 && node.kind == (uint)CentroidKind.FocusAnchor)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private void UpdateWireBox(Transform root, LineRenderer lr, InteropVoodooBoundingBox bb,
+            float lineWidthM)
         {
             if (root == null || lr == null)
             {
@@ -251,6 +406,7 @@ namespace ThreeOS
             var extents = InteropStructs.OpenXrToUnityPosition(bb.extents.ToVector3());
             root.SetPositionAndRotation(pose.position, pose.rotation);
             root.localScale = Vector3.one;
+            lr.widthMultiplier = lineWidthM;
             SetWireCubePositions(lr, new Vector3(
                 Mathf.Abs(extents.x) * 0.5f,
                 Mathf.Abs(extents.y) * 0.5f,
@@ -383,7 +539,7 @@ namespace ThreeOS
             lr.useWorldSpace = false;
             lr.loop = false;
             lr.positionCount = 16; // 12 edges as 16 verts with shared corners walk
-            lr.widthMultiplier = 0.008f;
+            lr.widthMultiplier = FarWireWidthM;
             lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             lr.receiveShadows = false;
             lr.material = CreateLineMaterial(color);

@@ -176,7 +176,16 @@ namespace ThreeOS
 
             HideNonGlyphMovables();
             yield return WaitForHeadPose();
-            if (!LoadDualMindPalaceFixture(_layoutHeadPose))
+
+            // Final Demo Act I (MR cold open): Stage is present → defer dual Mind Palace
+            // centroids/glyphs until Act II / Task 7.7. DemoScene has no Stage → load as usual.
+            var deferPalace = ShouldDeferMindPalaceFixture();
+            if (deferPalace)
+            {
+                _status = "final-demo MR cold open — Mind Palace load deferred";
+                Debug.Log($"[3OS] {_status}");
+            }
+            else if (!LoadDualMindPalaceFixture(_layoutHeadPose))
             {
                 Debug.LogError($"[3OS] dual-mind-palace load aborted: {_status}");
                 yield break;
@@ -187,9 +196,19 @@ namespace ThreeOS
                       FindFirstObjectByType<ThreeOSKinematicsController>();
             kin?.PushKinematicsParams();
             RebuildViews();
-            _status = $"demo {_glyphs.Views.Count} glyphs dual-mind-palace @ {ThreeOSStorageWriteThrough.ShortPath(_demoRoot)}";
-            Debug.Log(
-                $"[3OS] demo loaded views={_glyphs.Views.Count} kernelItems={_bridge.StorageItemCount()} root={_demoRoot}");
+            if (deferPalace)
+            {
+                _status =
+                    $"final-demo MR ready (0 glyphs; Palace deferred) roots={ThreeOSStorageWriteThrough.ShortPath(_demoRoot)}";
+                Debug.Log($"[3OS] {_status}");
+            }
+            else
+            {
+                _status =
+                    $"demo {_glyphs.Views.Count} glyphs dual-mind-palace @ {ThreeOSStorageWriteThrough.ShortPath(_demoRoot)}";
+                Debug.Log(
+                    $"[3OS] demo loaded views={_glyphs.Views.Count} kernelItems={_bridge.StorageItemCount()} root={_demoRoot}");
+            }
 
             if (!ThreeOSAndroidStorage.IsExternalStorageManager())
                 Debug.Log("[3OS] all-files access not granted yet (OK for boot; will prompt on cut/drop)");
@@ -215,6 +234,21 @@ namespace ThreeOS
                     continue;
                 movable.gameObject.SetActive(false);
             }
+        }
+
+        /// <summary>
+        /// True when Final Demo Stage is in the loaded scene (sample Assembly-CSharp marker).
+        /// Package cannot hard-reference that type, so match by runtime type name.
+        /// </summary>
+        private static bool ShouldDeferMindPalaceFixture()
+        {
+            foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
+            {
+                if (mb != null && mb.GetType().Name == "ThreeOSFinalDemoStage")
+                    return true;
+            }
+
+            return false;
         }
 
         private IEnumerator WaitForHeadPose()
@@ -314,7 +348,7 @@ namespace ThreeOS
             {
                 foreach (var fileName in new[]
                          { "box.3glyph", "box_open.3glyph", "gltf_mark.3glyph", "scissors.3glyph",
-                           "heart.3glyph", "heart_filled.3glyph", "arrow.3glyph" })
+                           "heart.3glyph", "heart_filled.3glyph", "arrow.3glyph", "mic.3glyph" })
                 {
                     var url = Path.Combine(Application.streamingAssetsPath, "3OS", "glyphs", fileName);
 #if UNITY_ANDROID && !UNITY_EDITOR

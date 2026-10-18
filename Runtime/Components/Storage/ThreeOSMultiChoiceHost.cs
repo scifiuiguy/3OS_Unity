@@ -36,6 +36,8 @@ namespace ThreeOS
         private readonly GameObject[] _slotNodes = new GameObject[8];
         private readonly Renderer[] _slotRends = new Renderer[8];
         private readonly TextMesh[] _slotLabels = new TextMesh[8];
+        private readonly GameObject[] _slotMicRoots = new GameObject[8];
+        private readonly Renderer[] _slotMicRends = new Renderer[8];
         private GameObject _pageBack;
         private GameObject _pageFwd;
         private Renderer _pageBackShellRend;
@@ -65,7 +67,18 @@ namespace ThreeOS
         private static bool _arrowMeshAttempted;
         private static Mesh _heartMesh;
         private static Mesh _heartFilledMesh;
+        private static Mesh _micMesh;
         private static bool _heartMeshesAttempted;
+        private static bool _micMeshAttempted;
+
+        // Agent widget pop-in (Task 7.4): 0 → overshoot → 1 from center.
+        private bool _agentAppearActive;
+        private float _agentAppearT = -1f;
+        private const float AgentAppearSeconds = 0.28f;
+        private const float AgentAppearOvershoot = 1.06f;
+
+        /// <summary>Raised when agent Speak slot is confirmed (Task 7.3 → 7.4).</summary>
+        public static event System.Action OnAgentSpeak;
 
         internal ThreeOSMultiChoiceHost(ThreeOSStorageController host) { _host = host; }
 
@@ -305,6 +318,13 @@ namespace ThreeOS
         {
             if (!Bridge.PollMultiChoiceAction(out var action, out var targetId, out var kind))
                 return;
+
+            if (action == MultiChoiceAction.Speak)
+            {
+                Debug.Log("[3OS][7.3] Agent Speak selected (EQ / playlist → Task 7.4)");
+                OnAgentSpeak?.Invoke();
+                return;
+            }
             if (action == MultiChoiceAction.None)
                 return;
 
@@ -385,6 +405,8 @@ namespace ThreeOS
         {
             if (_lastState.open == 0)
             {
+                _agentAppearActive = false;
+                _agentAppearT = -1f;
                 DestroyViz();
                 return;
             }
@@ -392,6 +414,7 @@ namespace ThreeOS
             EnsureViz();
             var unityPose = InteropStructs.ToUnityPose(_lastState.center);
             _widgetRoot.transform.SetPositionAndRotation(unityPose.position, unityPose.rotation);
+            TickAgentAppearScale();
 
             if (_titleText != null)
                 _titleText.text = _lastState.Title;
@@ -417,6 +440,7 @@ namespace ThreeOS
 
                 var enabled = slot.enabled != 0;
                 var fav = slot.kind == (uint)MultiChoiceSlotKind.ActionFavorite;
+                var speak = slot.kind == (uint)MultiChoiceSlotKind.ActionSpeak;
                 var filled = fav && Bridge.IsFavorite(_lastState.contextBoxId);
                 Color baseCol;
                 if (fav)
@@ -440,17 +464,43 @@ namespace ThreeOS
                 }
                 else
                 {
+                    // Speak keeps the translucent node shell; mic is a label-style overlay.
                     var mf = node.GetComponent<MeshFilter>();
                     if (mf != null)
                         mf.sharedMesh = EnsureSlotMesh();
                 }
 
+                // Mic glyph: sibling under widget (like TextMesh labels), white↔black on hover.
+                var micRoot = _slotMicRoots[i];
+                var micRend = _slotMicRends[i];
+                if (micRoot != null)
+                {
+                    var showMic = speak && enabled;
+                    micRoot.SetActive(showMic);
+                    if (showMic)
+                    {
+                        EnsureMicMesh();
+                        var mmf = micRoot.GetComponent<MeshFilter>();
+                        if (mmf != null && _micMesh != null)
+                            mmf.sharedMesh = _micMesh;
+                        micRoot.transform.localPosition = lp;
+                        // Fit inside shell; counter OpenXR→Unity X-mirror like labels/arrows.
+                        var micSize = SlotSizeM * 0.62f * (hover ? 1.08f : 1f);
+                        micRoot.transform.localScale = new Vector3(-micSize, micSize, micSize);
+                        micRoot.transform.localRotation = Quaternion.Euler(0f, 180f, 0f);
+                        SetNodeColor(micRend, hover ? Color.black : Color.white, 1f);
+                        SetArrowDrawInFront(micRend, hover);
+                    }
+                }
+
                 // In-slot label (sibling under widget so signed mesh scale does not mirror text).
+                // Speak uses mic glyph only — hide text.
                 var label = _slotLabels[i];
                 if (label != null)
                 {
-                    label.gameObject.SetActive(enabled && !string.IsNullOrEmpty(slot.Label));
-                    if (enabled)
+                    var showText = enabled && !speak && !string.IsNullOrEmpty(slot.Label);
+                    label.gameObject.SetActive(showText);
+                    if (showText)
                     {
                         label.text = slot.Label ?? string.Empty;
                         label.transform.localPosition = lp;
@@ -461,12 +511,19 @@ namespace ThreeOS
                 }
             }
 
+            var agentMode = _lastState.mode == (uint)MultiChoiceMode.Agent;
             // Pagination: squashed cuboid shells + arrow glyphs (pitch 90, yaw 180, 5×).
             var pageHalf = SlotSizeM * 0.25f;
             var shellScale = new Vector3(SlotSizeM * 0.5f, SlotSizeM * 0.85f, SlotSizeM * 0.85f);
             var arrowSize = SlotSizeM * 0.55f * 5f;
             if (_pageBack != null)
             {
+                if (agentMode)
+                {
+                    _pageBack.SetActive(false);
+                }
+                else
+                {
                 _pageBack.SetActive(true);
                 _pageBack.transform.localPosition = OpenXrLocalToUnity(new Vector3(-pageHalf, 0f, 0f));
                 _pageBack.transform.localRotation = Quaternion.identity;
@@ -489,10 +546,17 @@ namespace ThreeOS
                         en ? 1f : Mathf.Max(DisabledAlpha, 0.35f));
                     SetArrowDrawInFront(_pageBackArrowRend, h);
                 }
+                } // !agentMode
             }
 
             if (_pageFwd != null)
             {
+                if (agentMode)
+                {
+                    _pageFwd.SetActive(false);
+                }
+                else
+                {
                 _pageFwd.SetActive(true);
                 _pageFwd.transform.localPosition = OpenXrLocalToUnity(new Vector3(pageHalf, 0f, 0f));
                 _pageFwd.transform.localRotation = Quaternion.identity;
@@ -513,6 +577,7 @@ namespace ThreeOS
                         en ? 1f : Mathf.Max(DisabledAlpha, 0.35f));
                     SetArrowDrawInFront(_pageFwdArrowRend, h);
                 }
+                } // !agentMode
             }
 
             if (_confirmRoot != null)
@@ -595,6 +660,7 @@ namespace ThreeOS
                     new Color(0.45f, 0.78f, 0.95f, EnabledAlpha));
                 _slotRends[i] = _slotNodes[i].GetComponent<Renderer>();
                 _slotLabels[i] = MakeSlotLabel(_widgetRoot.transform, $"SlotLabel{i}");
+                _slotMicRoots[i] = MakeSlotMic(_widgetRoot.transform, $"SlotMic{i}", out _slotMicRends[i]);
             }
 
             _pageBack = MakePageButton(_widgetRoot.transform, "PageBack", tipBack: true,
@@ -684,6 +750,22 @@ namespace ThreeOS
             tm.text = string.Empty;
             go.SetActive(false);
             return tm;
+        }
+
+        /// <summary>
+        /// Speak-slot mic glyph: opaque white↔black like text labels / page arrows (not shell tint).
+        /// </summary>
+        private static GameObject MakeSlotMic(Transform parent, string name, out Renderer rend)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(parent, false);
+            var mf = go.AddComponent<MeshFilter>();
+            EnsureMicMesh();
+            mf.sharedMesh = _micMesh != null ? _micMesh : EnsureSlotMesh();
+            rend = go.AddComponent<MeshRenderer>();
+            rend.sharedMaterial = ThreeOSGlyphViewRegistry.CreateTranslucentUnlitMaterial(Color.white);
+            go.SetActive(false);
+            return go;
         }
 
         private static void SetNodeColor(Renderer rend, Color rgb, float alpha)
@@ -789,8 +871,63 @@ namespace ThreeOS
             return _arrowMesh;
         }
 
+        private void TickAgentAppearScale()
+        {
+            if (_widgetRoot == null)
+                return;
+
+            var agent = _lastState.mode == (uint)MultiChoiceMode.Agent;
+            if (!agent)
+            {
+                _agentAppearActive = false;
+                _agentAppearT = -1f;
+                _widgetRoot.transform.localScale = Vector3.one;
+                return;
+            }
+
+            if (!_agentAppearActive)
+            {
+                _agentAppearActive = true;
+                _agentAppearT = 0f;
+                _widgetRoot.transform.localScale = Vector3.zero;
+            }
+
+            if (_agentAppearT < 0f)
+            {
+                _widgetRoot.transform.localScale = Vector3.one;
+                return;
+            }
+
+            _agentAppearT += Time.deltaTime / Mathf.Max(1e-4f, AgentAppearSeconds);
+            if (_agentAppearT >= 1f)
+            {
+                _agentAppearT = -1f;
+                _widgetRoot.transform.localScale = Vector3.one;
+                return;
+            }
+
+            // Rise to overshoot by ~70%, then settle to 1.
+            float s;
+            if (_agentAppearT < 0.7f)
+            {
+                var u = _agentAppearT / 0.7f;
+                var e = u * u * (3f - 2f * u); // smoothstep
+                s = AgentAppearOvershoot * e;
+            }
+            else
+            {
+                var u = (_agentAppearT - 0.7f) / 0.3f;
+                var e = u * u * (3f - 2f * u);
+                s = Mathf.Lerp(AgentAppearOvershoot, 1f, e);
+            }
+
+            _widgetRoot.transform.localScale = Vector3.one * s;
+        }
+
         private void DestroyViz()
         {
+            _agentAppearActive = false;
+            _agentAppearT = -1f;
             if (_widgetRoot != null)
             {
                 UnityEngine.Object.Destroy(_widgetRoot);
@@ -808,6 +945,8 @@ namespace ThreeOS
                 _slotNodes[i] = null;
                 _slotRends[i] = null;
                 _slotLabels[i] = null;
+                _slotMicRoots[i] = null;
+                _slotMicRends[i] = null;
             }
 
             _pageBack = null;
@@ -844,6 +983,55 @@ namespace ThreeOS
             _heartFilledMesh = LoadGlyphMesh("heart_filled");
         }
 
+        private static void EnsureMicMesh()
+        {
+            if (_micMeshAttempted)
+                return;
+            _micMeshAttempted = true;
+            // mic.3glyph is authored ~0.08 m; slot cuboid is unit-sized. Normalize so
+            // SlotSizeM localScale matches other Multi-Choice nodes.
+            _micMesh = NormalizeMeshToUnitCube(LoadGlyphMesh("mic"));
+        }
+
+        /// <summary>
+        /// Scale mesh verts so max AABB axis = 1 (centered), matching <c>mc_slot</c>.
+        /// </summary>
+        private static Mesh NormalizeMeshToUnitCube(Mesh src)
+        {
+            if (src == null)
+                return null;
+            var b = src.bounds;
+            var max = Mathf.Max(b.size.x, Mathf.Max(b.size.y, b.size.z));
+            if (max < 1e-5f)
+                return src;
+
+            var scale = 1f / max;
+            var center = b.center;
+            var verts = src.vertices;
+            for (var i = 0; i < verts.Length; i++)
+                verts[i] = (verts[i] - center) * scale;
+
+            var mesh = new Mesh
+            {
+                name = string.IsNullOrEmpty(src.name) ? "glyph_unit" : src.name + "_unit"
+            };
+            mesh.vertices = verts;
+            mesh.triangles = src.triangles;
+            if (src.normals != null && src.normals.Length == verts.Length)
+            {
+                mesh.normals = src.normals;
+            }
+            else
+            {
+                mesh.RecalculateNormals();
+            }
+
+            if (src.uv != null && src.uv.Length == verts.Length)
+                mesh.uv = src.uv;
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
         private static Mesh LoadGlyphMesh(string resourceName)
         {
             try
@@ -867,7 +1055,7 @@ namespace ThreeOS
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[3OS] heart glyph load {resourceName}: {ex.Message}");
+                Debug.LogWarning($"[3OS] glyph load {resourceName}: {ex.Message}");
             }
 
             return null;

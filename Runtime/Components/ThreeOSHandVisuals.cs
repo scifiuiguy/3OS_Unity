@@ -17,8 +17,13 @@ namespace ThreeOS
 
         private void OnEnable()
         {
-            _left = Spawn("3OS/Hands/LeftHandTracking", "3OS_LeftHandMesh", out _leftRenderers);
-            _right = Spawn("3OS/Hands/RightHandTracking", "3OS_RightHandMesh", out _rightRenderers);
+            // Quest builds prefer AndroidHand_* (Meta mesh); editor/desktop use XR Hands samples.
+            _left = SpawnFirst(
+                new[] { "3OS/Hands/AndroidHand_L_Tracking", "3OS/Hands/LeftHandTracking" },
+                "3OS_LeftHandMesh", out _leftRenderers);
+            _right = SpawnFirst(
+                new[] { "3OS/Hands/AndroidHand_R_Tracking", "3OS/Hands/RightHandTracking" },
+                "3OS_RightHandMesh", out _rightRenderers);
             if (_left == null && _right == null)
             {
                 Debug.LogWarning(
@@ -50,6 +55,26 @@ namespace ThreeOS
 
             _leftRenderers = System.Array.Empty<Renderer>();
             _rightRenderers = System.Array.Empty<Renderer>();
+        }
+
+        private static GameObject SpawnFirst(string[] resourcePaths, string name, out Renderer[] renderers)
+        {
+            renderers = System.Array.Empty<Renderer>();
+            if (resourcePaths == null)
+            {
+                return null;
+            }
+
+            for (var i = 0; i < resourcePaths.Length; i++)
+            {
+                var go = Spawn(resourcePaths[i], name, out renderers);
+                if (go != null)
+                {
+                    return go;
+                }
+            }
+
+            return null;
         }
 
         private static GameObject Spawn(string resourcePath, string name, out Renderer[] renderers)

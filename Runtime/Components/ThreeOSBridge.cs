@@ -235,6 +235,14 @@ namespace ThreeOS
         private static extern int threeos_voodoo_set_field_params(ref InteropVoodooFieldParams parameters);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_set_enclosure_boxes(
+            [In] InteropVoodooEnclosureBox[] boxes, uint count);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_set_room_bounds(
+            ref ThreeOSVec3 minXyz, ref ThreeOSVec3 maxXyz, int enabled);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_voodoo_get_session(uint hand, out InteropVoodooSession outSession);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
@@ -370,6 +378,22 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_multichoice_open_folder(uint hand, ref ThreeOSPose center,
             ulong boxId);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multichoice_open_agent(uint hand, ref ThreeOSPose center);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern ulong threeos_focus_anchor_register(string name, ref ThreeOSPose pose);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_focus_anchor_set_pose(ulong id, ref ThreeOSPose pose);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_focus_anchor_clear(ulong id);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_near_rest_pose(ref ThreeOSPose head,
+            out ThreeOSPose outPose);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern void threeos_multichoice_close();
@@ -644,6 +668,71 @@ namespace ThreeOS
         public bool SetVoodooFieldParams(InteropVoodooFieldParams parameters) =>
             IsLoaded && NativeAbiVersion >= 6 &&
             Call(() => threeos_voodoo_set_field_params(ref parameters));
+
+        /// <summary>
+        /// MR room AABB (OpenXR). Pass enabled=false to clear.
+        /// </summary>
+        public bool SetVoodooRoomBounds(ThreeOSVec3 minXyz, ThreeOSVec3 maxXyz, bool enabled)
+        {
+            if (!IsLoaded || NativeAbiVersion < 6)
+                return false;
+            try
+            {
+                var rc = threeos_voodoo_set_room_bounds(ref minXyz, ref maxXyz, enabled ? 1 : 0);
+                if (rc != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Publish MR WorldMesh solid OBBs (OpenXR). Empty or null clears.
+        /// </summary>
+        public bool SetVoodooEnclosureBoxes(InteropVoodooEnclosureBox[] boxes)
+        {
+            if (!IsLoaded || NativeAbiVersion < 6)
+                return false;
+            try
+            {
+                if (boxes == null || boxes.Length == 0)
+                {
+                    var rcClear = threeos_voodoo_set_enclosure_boxes(null, 0);
+                    if (rcClear != 0)
+                    {
+                        LastError = ReadLastError();
+                        return false;
+                    }
+
+                    LastError = string.Empty;
+                    return true;
+                }
+
+                var rc = threeos_voodoo_set_enclosure_boxes(boxes, (uint)boxes.Length);
+                if (rc != 0)
+                {
+                    LastError = ReadLastError();
+                    return false;
+                }
+
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
 
         public void MindPalaceClear()
         {
@@ -1256,6 +1345,38 @@ namespace ThreeOS
 
         public bool OpenMultiChoiceFolder(uint hand, ThreeOSPose center, ulong boxId) =>
             Call(() => threeos_multichoice_open_folder(hand, ref center, boxId));
+
+        public bool OpenMultiChoiceAgent(uint hand, ThreeOSPose center) =>
+            Call(() => threeos_multichoice_open_agent(hand, ref center));
+
+        public ulong RegisterFocusAnchor(string name, ThreeOSPose pose)
+        {
+            if (!IsLoaded || NativeAbiVersion < 6) return 0;
+            try { return threeos_focus_anchor_register(name ?? "focus", ref pose); }
+            catch (Exception ex) { LastError = ex.Message; return 0; }
+        }
+
+        public bool SetFocusAnchorPose(ulong id, ThreeOSPose pose) =>
+            id != 0 && Call(() => threeos_focus_anchor_set_pose(id, ref pose));
+
+        public bool ClearFocusAnchor(ulong id) =>
+            id != 0 && Call(() => threeos_focus_anchor_clear(id));
+
+        public bool TryGetNearRestPose(ThreeOSPose head, out ThreeOSPose pose)
+        {
+            pose = default;
+            if (!IsLoaded || NativeAbiVersion < 6) return false;
+            try
+            {
+                var rc = threeos_voodoo_near_rest_pose(ref head, out pose);
+                return rc == 0;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
 
         public void CloseMultiChoice()
         {
