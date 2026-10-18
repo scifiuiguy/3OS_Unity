@@ -17,11 +17,11 @@ namespace ThreeOS
         private readonly Dictionary<ulong, string> _rootPaths = new Dictionary<ulong, string>();
         private readonly Dictionary<ulong, string> _favoriteNames = new Dictionary<ulong, string>();
 
-        // 2×2×2 @ 3″ voxels → ~6″ Multi-Choice cube (HCI / ).
+        // 2×2×2 @ 3″ voxels → ~6″ Multi-Choice cube.
         private const float VoxelM = 3f * 0.0254f;          // 0.0762
         private const float HalfExtentM = VoxelM * 0.5f;   // slot centers at ±1.5″
         private const float SlotSizeM = VoxelM * 0.82f;     // fill most of each voxel
-        // Translucent so in-slot labels stay readable (-style).
+        // Translucent so in-slot labels stay readable.
         private const float DisabledAlpha = 0.10f;
         private const float EnabledAlpha = 0.32f;
         private const float HoverAlpha = 0.48f;
