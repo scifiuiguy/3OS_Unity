@@ -18,8 +18,8 @@ namespace ThreeOS
     [DefaultExecutionOrder(-100)]
     public sealed class ThreeOSInputRouter : MonoBehaviour
     {
-        // ~3cm — readable in MR office; prior 1.5cm was easy to miss without ghost hands.
-        public const float CursorBaseDiameterM = 0.03f;
+        // ~1.5cm (50% of prior 3cm) — tighter point cursors with ghost hands visible.
+        public const float CursorBaseDiameterM = 0.015f;
 
         private ThreeOSBridge _bridge;
         private ThreeOSStorageController _storage;

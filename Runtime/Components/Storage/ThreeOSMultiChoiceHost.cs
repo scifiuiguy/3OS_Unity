@@ -21,10 +21,12 @@ namespace ThreeOS
         private const float VoxelM = 3f * 0.0254f;          // 0.0762
         private const float HalfExtentM = VoxelM * 0.5f;   // slot centers at ±1.5″
         private const float SlotSizeM = VoxelM * 0.82f;     // fill most of each voxel
-        // Translucent so in-slot labels stay readable.
-        private const float DisabledAlpha = 0.10f;
-        private const float EnabledAlpha = 0.32f;
-        private const float HoverAlpha = 0.48f;
+        // Translucent shells (halved from 0.10/0.32/0.48). In Agent mode non-Speak
+        // shells take another ×0.5 so only the mic reads as selectable.
+        private const float DisabledAlpha = 0.05f;
+        private const float EnabledAlpha = 0.16f;
+        private const float HoverAlpha = 0.24f;
+        private const float WidgetDownM = 3f * 0.0254f; // 3″ below authored center
 
         /// <summary>
         /// Fill index 0..7 → geometric octant bits (matches core
@@ -77,10 +79,22 @@ namespace ThreeOS
         private const float AgentAppearSeconds = 0.28f;
         private const float AgentAppearOvershoot = 1.06f;
 
-        /// <summary>Raised when agent Speak slot is confirmed (Task 7.3 → 7.4).</summary>
-        public static event System.Action OnAgentSpeak;
+        // Agent shrink (Task 7.4 exit): lerp → 0, hold (no deallocate).
+        private bool _agentShrinkActive;
+        private float _agentShrinkT = -1f;
+        private float _agentShrinkDuration = 1f;
+        private float _agentHeldScale = 1f;
 
-        internal ThreeOSMultiChoiceHost(ThreeOSStorageController host) { _host = host; }
+        // Speak (mic) confirm: +10% scale bump on pinch, then ease back.
+        private float _speakSelectPulseT = -1f;
+        private const float SpeakSelectPulseSeconds = 0.22f;
+        private const float SpeakSelectPulseScale = 1.10f;
+
+        internal ThreeOSMultiChoiceHost(ThreeOSStorageController host)
+        {
+            _host = host;
+            ThreeOSAgentSession.Bind(StartAgentShrink, StartAgentPopIn);
+        }
 
         private ThreeOSBridge Bridge => _host.Bridge;
         private ThreeOSInputRouter Input => _host.Input;
@@ -231,7 +245,11 @@ namespace ThreeOS
         /// </summary>
         private static ThreeOSPose WidgetPoseFromCursor(InteropPointCursor cursor, ThreeOSPose head)
         {
-            var pos = new Vector3(cursor.position.x, cursor.position.y + 0.02f, cursor.position.z);
+            // +2cm above cursor, then WidgetDownM so hover/collision and meshes share one center.
+            var pos = new Vector3(
+                cursor.position.x,
+                cursor.position.y + 0.02f - WidgetDownM,
+                cursor.position.z);
             var toHead = new Vector3(head.position.x - pos.x, 0f, head.position.z - pos.z);
             if (toHead.sqrMagnitude < 1e-6f)
                 toHead = new Vector3(0f, 0f, -1f);
@@ -322,7 +340,8 @@ namespace ThreeOS
             if (action == MultiChoiceAction.Speak)
             {
                 Debug.Log("[3OS][7.3] Agent Speak selected (EQ / playlist → Task 7.4)");
-                OnAgentSpeak?.Invoke();
+                _speakSelectPulseT = 0f;
+                ThreeOSAgentSession.NotifySpeak();
                 return;
             }
             if (action == MultiChoiceAction.None)
@@ -407,20 +426,43 @@ namespace ThreeOS
             {
                 _agentAppearActive = false;
                 _agentAppearT = -1f;
+                _agentShrinkActive = false;
+                _agentShrinkT = -1f;
+                _agentHeldScale = 1f;
                 DestroyViz();
+                ThreeOSAgentSession.SetWidgetRoot(null, false);
                 return;
             }
 
             EnsureViz();
+            // Draw at kernel center (already includes WidgetDownM from open) so hover matches meshes.
             var unityPose = InteropStructs.ToUnityPose(_lastState.center);
             _widgetRoot.transform.SetPositionAndRotation(unityPose.position, unityPose.rotation);
-            TickAgentAppearScale();
+            TickAgentScale();
+            var agent = _lastState.mode == (uint)MultiChoiceMode.Agent;
+            ThreeOSAgentSession.SetWidgetRoot(_widgetRoot != null ? _widgetRoot.transform : null, agent);
 
             if (_titleText != null)
                 _titleText.text = _lastState.Title;
             // Leave blank when hovering disabled/empty (avoid repeating the title).
             if (_hoverText != null)
                 _hoverText.text = _lastState.HoverLabel ?? string.Empty;
+
+            var speakSelectMul = 1f;
+            if (_speakSelectPulseT >= 0f)
+            {
+                _speakSelectPulseT += Time.deltaTime / Mathf.Max(1e-4f, SpeakSelectPulseSeconds);
+                if (_speakSelectPulseT >= 1f)
+                {
+                    _speakSelectPulseT = -1f;
+                }
+                else
+                {
+                    var u = Mathf.Clamp01(_speakSelectPulseT);
+                    var e = u * u * (3f - 2f * u);
+                    speakSelectMul = Mathf.Lerp(SpeakSelectPulseScale, 1f, e);
+                }
+            }
 
             for (var i = 0; i < 8; i++)
             {
@@ -431,7 +473,8 @@ namespace ThreeOS
                 var (sx, sy, sz) = OctantSigns(SlotToOctant[i]);
                 // Core OpenXR octant (sx,sy,−sz) → Unity local; signed scale keeps notch→center.
                 var hover = _lastState.hoveredSlot == i;
-                var size = SlotSizeM * (hover ? 1.08f : 1f);
+                var speak = slot.kind == (uint)MultiChoiceSlotKind.ActionSpeak;
+                var size = SlotSizeM * (hover ? 1.08f : 1f) * (speak ? speakSelectMul : 1f);
                 var lp = OctantUnityLocal(sx, sy, sz, HalfExtentM);
                 node.transform.localPosition = lp;
                 node.transform.localScale = new Vector3(
@@ -440,7 +483,6 @@ namespace ThreeOS
 
                 var enabled = slot.enabled != 0;
                 var fav = slot.kind == (uint)MultiChoiceSlotKind.ActionFavorite;
-                var speak = slot.kind == (uint)MultiChoiceSlotKind.ActionSpeak;
                 var filled = fav && Bridge.IsFavorite(_lastState.contextBoxId);
                 Color baseCol;
                 if (fav)
@@ -450,6 +492,9 @@ namespace ThreeOS
                 else
                     baseCol = new Color(0.45f, 0.78f, 0.95f);
                 var a = !enabled ? DisabledAlpha : (hover ? HoverAlpha : EnabledAlpha);
+                // Agent: non-mic nodes look disabled (another ×0.5); Speak keeps shell alpha.
+                if (agent && !speak)
+                    a *= 0.5f;
                 SetNodeColor(_slotRends[i], baseCol, a);
 
                 if (fav)
@@ -485,7 +530,8 @@ namespace ThreeOS
                             mmf.sharedMesh = _micMesh;
                         micRoot.transform.localPosition = lp;
                         // Fit inside shell; counter OpenXR→Unity X-mirror like labels/arrows.
-                        var micSize = SlotSizeM * 0.62f * (hover ? 1.08f : 1f);
+                        // +10% on Speak pinch (speakSelectMul), same as shell.
+                        var micSize = SlotSizeM * 0.62f * (hover ? 1.08f : 1f) * speakSelectMul;
                         micRoot.transform.localScale = new Vector3(-micSize, micSize, micSize);
                         micRoot.transform.localRotation = Quaternion.Euler(0f, 180f, 0f);
                         SetNodeColor(micRend, hover ? Color.black : Color.white, 1f);
@@ -871,7 +917,30 @@ namespace ThreeOS
             return _arrowMesh;
         }
 
-        private void TickAgentAppearScale()
+        private void StartAgentShrink(float durationSec)
+        {
+            if (_widgetRoot == null)
+                return;
+            _agentAppearActive = false;
+            _agentAppearT = -1f;
+            _agentShrinkActive = true;
+            _agentShrinkT = 0f;
+            _agentShrinkDuration = Mathf.Max(0.05f, durationSec);
+            _agentHeldScale = Mathf.Max(0.001f, _widgetRoot.transform.localScale.x);
+        }
+
+        private void StartAgentPopIn()
+        {
+            _agentShrinkActive = false;
+            _agentShrinkT = -1f;
+            _agentHeldScale = 1f;
+            _agentAppearActive = true;
+            _agentAppearT = 0f;
+            if (_widgetRoot != null)
+                _widgetRoot.transform.localScale = Vector3.zero;
+        }
+
+        private void TickAgentScale()
         {
             if (_widgetRoot == null)
                 return;
@@ -881,53 +950,94 @@ namespace ThreeOS
             {
                 _agentAppearActive = false;
                 _agentAppearT = -1f;
+                _agentShrinkActive = false;
+                _agentShrinkT = -1f;
                 _widgetRoot.transform.localScale = Vector3.one;
                 return;
             }
 
-            if (!_agentAppearActive)
+            if (_agentShrinkActive)
             {
+                _agentShrinkT += Time.deltaTime / _agentShrinkDuration;
+                if (_agentShrinkT >= 1f)
+                {
+                    _agentShrinkActive = false;
+                    _agentShrinkT = -1f;
+                    _agentHeldScale = 0f;
+                    _widgetRoot.transform.localScale = Vector3.zero;
+                    return;
+                }
+
+                var u = Mathf.Clamp01(_agentShrinkT);
+                var e = u * u * (3f - 2f * u);
+                var s = Mathf.Lerp(_agentHeldScale, 0f, e);
+                _widgetRoot.transform.localScale = Vector3.one * s;
+                return;
+            }
+
+            // Held at 0 after shrink until pop-in / reopen.
+            if (_agentHeldScale <= 1e-4f && _agentAppearT < 0f && !_agentAppearActive)
+            {
+                _widgetRoot.transform.localScale = Vector3.zero;
+                return;
+            }
+
+            if (!_agentAppearActive && _agentAppearT < 0f && _agentHeldScale > 1e-4f)
+            {
+                // First SyncViz after open: kick pop-in.
                 _agentAppearActive = true;
                 _agentAppearT = 0f;
                 _widgetRoot.transform.localScale = Vector3.zero;
             }
 
+            if (!_agentAppearActive)
+            {
+                if (_agentAppearT < 0f)
+                    _widgetRoot.transform.localScale = Vector3.one * Mathf.Max(_agentHeldScale, 1f);
+                return;
+            }
+
             if (_agentAppearT < 0f)
             {
                 _widgetRoot.transform.localScale = Vector3.one;
+                _agentHeldScale = 1f;
                 return;
             }
 
             _agentAppearT += Time.deltaTime / Mathf.Max(1e-4f, AgentAppearSeconds);
             if (_agentAppearT >= 1f)
             {
+                // Keep _agentAppearActive true so we do not re-kick pop-in every frame.
                 _agentAppearT = -1f;
+                _agentHeldScale = 1f;
                 _widgetRoot.transform.localScale = Vector3.one;
                 return;
             }
 
             // Rise to overshoot by ~70%, then settle to 1.
-            float s;
+            float sAppear;
             if (_agentAppearT < 0.7f)
             {
                 var u = _agentAppearT / 0.7f;
                 var e = u * u * (3f - 2f * u); // smoothstep
-                s = AgentAppearOvershoot * e;
+                sAppear = AgentAppearOvershoot * e;
             }
             else
             {
                 var u = (_agentAppearT - 0.7f) / 0.3f;
                 var e = u * u * (3f - 2f * u);
-                s = Mathf.Lerp(AgentAppearOvershoot, 1f, e);
+                sAppear = Mathf.Lerp(AgentAppearOvershoot, 1f, e);
             }
 
-            _widgetRoot.transform.localScale = Vector3.one * s;
+            _widgetRoot.transform.localScale = Vector3.one * sAppear;
         }
 
         private void DestroyViz()
         {
             _agentAppearActive = false;
             _agentAppearT = -1f;
+            _agentShrinkActive = false;
+            _agentShrinkT = -1f;
             if (_widgetRoot != null)
             {
                 UnityEngine.Object.Destroy(_widgetRoot);
