@@ -17,7 +17,7 @@ namespace ThreeOS
         public const string DemoFolderName = "3OS_Demo";
         public const string DemoFolderName2 = "3OS_Demo2";
         public const float MindPalaceFixtureRangeM = 10f * 0.3048f;
-        public const float MindPalaceFixtureHeightM = 2.5f * 0.3048f;
+        public const float MindPalaceFixtureHeightM = 4.5f * 0.3048f;
         public const float MindPalaceFixtureAzimuthDeg = 15f;
         public const float GlyphSizeM = 0.1f;
         public const float DismissXDiameterM = 0.06f;
@@ -68,12 +68,52 @@ namespace ThreeOS
         private bool _leftTriggerWasDown;
         private bool _rightTriggerWasDown;
 
+        // Phase 0.7 Task 7.8 — Final Demo Palace reveal / soft-dismiss
+        public const float PalaceClusterScaleSeconds = 0.5f;
+        private bool _palaceFixtureLoaded;
+        private bool _palaceSoftDismissed;
+        private ulong _mpLeftId;
+        private ulong _mpRightId;
+        private ThreeOSPose _mpLeftAnchor;
+        private ThreeOSPose _mpRightAnchor;
+        private readonly List<ulong> _palaceEntityIds = new List<ulong>();
+        private readonly Dictionary<ulong, ulong> _entityMindPalace = new Dictionary<ulong, ulong>();
+        private ulong _mrPersistedSelectionId;
+        private ulong _mrPersistedOriginalMpId;
+        private Vector3 _mrPersistedWorldPos;
+        private Quaternion _mrPersistedWorldRot = Quaternion.identity;
+        private bool _palaceClusterAnimBusy;
+        /// <summary>
+        /// True from palace view rebuild until cluster scale-in finishes. SyncViews must not
+        /// SetActive(true) at full size or glyphs flash before the intro animation.
+        /// </summary>
+        private bool _palacePendingScaleIn;
+        private List<string> _precacheFiles1;
+        private List<string> _precacheDirs1;
+        private List<string> _precacheFiles2;
+        private List<string> _precacheDirs2;
+        private bool _palaceNamesPrecached;
+
         public int PossessDriveHand =>
             (_possessing || _ghostDragging) && _selectHand >= 0 ? _selectHand : -1;
         public bool DemoActive { get; private set; }
         public string Status => _status;
         public string DemoRoot => _demoRoot;
         public string SelectionLabel => _selectionLabel;
+        public bool PalaceFixtureLoaded => _palaceFixtureLoaded;
+        public bool PalaceSoftDismissed => _palaceSoftDismissed;
+        public bool PalaceClusterAnimBusy => _palaceClusterAnimBusy;
+        public bool PalacePendingScaleIn => _palacePendingScaleIn;
+        public ulong MrPersistedSelectionId => _mrPersistedSelectionId;
+
+        internal bool IsPalaceEntity(ulong entityId) =>
+            entityId != 0 && _entityMindPalace.ContainsKey(entityId);
+
+        /// <summary>
+        /// Final Demo Palace: billboard every far-field label (not only selection) so TextMesh
+        /// backfaces do not clip when looking toward the field.
+        /// </summary>
+        public static bool BillboardAllFarFieldLabels { get; set; }
 
         // Visual reconcile is dirty-flagged — not a 72 Hz full workspace scan.
         bool _viewsDirty = true;
@@ -219,6 +259,8 @@ namespace ThreeOS
                 _status =
                     $"final-demo MR ready (0 glyphs; Palace deferred) roots={ThreeOSStorageWriteThrough.ShortPath(_demoRoot)}";
                 Debug.Log($"[3OS] {_status}");
+                // Warm Documents listings during Act I so wipe→Palace does not hitch on FS.
+                StartCoroutine(PrecachePalaceDirectoryNamesRoutine());
             }
             else
             {
@@ -352,6 +394,8 @@ namespace ThreeOS
             {
                 _glyphs.SyncGhostViewsFromKernel();
                 _ghostsDirty = false;
+                // Ghost sync rewrites base color with rim cleared — reapply selection same frame.
+                _selectionMatsDirty = true;
             }
 
             // Hover chrome only while something can be hovered.
@@ -454,35 +498,67 @@ namespace ThreeOS
                     $"[3OS] only {installed}/3 glyph packs installed — continuing with procedural glyphs");
         }
 
-        private bool LoadDualMindPalaceFixture(ThreeOSPose head)
+        private bool LoadDualMindPalaceFixture(ThreeOSPose origin)
         {
             _bridge.StorageClear();
             _bridge.MindPalaceClear();
-            var leftAnchor = MindPalaceFixturePose(head, -MindPalaceFixtureAzimuthDeg);
-            var rightAnchor = MindPalaceFixturePose(head, MindPalaceFixtureAzimuthDeg);
+            _palaceEntityIds.Clear();
+            _entityMindPalace.Clear();
+            _mrPersistedSelectionId = 0;
+            _mrPersistedOriginalMpId = 0;
+            var leftAnchor = MindPalaceFixturePose(origin, -MindPalaceFixtureAzimuthDeg);
+            var rightAnchor = MindPalaceFixturePose(origin, MindPalaceFixtureAzimuthDeg);
             if (!_bridge.TryRegisterMindPalace(DemoFolderName, leftAnchor, out var mpL) ||
                 !_bridge.TryRegisterMindPalace(DemoFolderName2, rightAnchor, out var mpR))
             {
                 _status = $"mind palace register failed: {_bridge.LastError}";
                 return false;
             }
-            if (!LoadDemoDirectory(_demoRoot, mpL, clearFirst: false))
+            _mpLeftId = mpL;
+            _mpRightId = mpR;
+            _mpLeftAnchor = leftAnchor;
+            _mpRightAnchor = rightAnchor;
+            if (!LoadDemoDirectory(_demoRoot, mpL, clearFirst: false, cheapChildCounts: true))
                 return false;
             if (string.IsNullOrEmpty(_demoRoot2) ||
-                !LoadDemoDirectory(_demoRoot2, mpR, clearFirst: false))
+                !LoadDemoDirectory(_demoRoot2, mpR, clearFirst: false, cheapChildCounts: true))
                 Debug.LogWarning($"[3OS] Demo2 load weak: {_status} — continuing with MindPalace L only");
+            CapturePalaceEntityIds();
             if (!_bridge.LayoutMindPalace(mpL, leftAnchor))
                 Debug.LogWarning($"[3OS] layout MindPalace L: {_bridge.LastError}");
             if (!_bridge.LayoutMindPalace(mpR, rightAnchor))
                 Debug.LogWarning($"[3OS] layout MindPalace R: {_bridge.LastError}");
+            _palaceFixtureLoaded = true;
+            _palaceSoftDismissed = false;
             Debug.Log($"[3OS] dual-mind-palace fixture L={mpL} R={mpR}");
             return true;
         }
 
-        private static ThreeOSPose MindPalaceFixturePose(ThreeOSPose head, float azimuthDeg)
+        /// <summary>
+        /// Layout origin from a transform's world position + yaw.
+        /// Final Demo 7.8.b uses <c>Player_Spawn_Point</c> — not HMD pose.
+        /// Kernel / <see cref="MindPalaceFixturePose"/> treat OpenXR <c>-Z</c> as forward; after
+        /// Unity↔OX conversion that maps to Unity <c>-Z</c>. Aim Unity look at
+        /// <c>-spawn.forward</c> so OX <c>-Z</c> aligns with Unity <c>+Z</c> on the spawn
+        /// (Player_Spawn_Point forward).
+        /// </summary>
+        public static ThreeOSPose PoseFromSpawnTransform(Transform spawn)
         {
-            var q = new Quaternion(head.orientation.x, head.orientation.y, head.orientation.z,
-                head.orientation.w);
+            if (spawn == null)
+                return default;
+            var fwd = spawn.forward;
+            fwd.y = 0f;
+            if (fwd.sqrMagnitude < 1e-6f)
+                fwd = Vector3.forward;
+            fwd.Normalize();
+            var unityPose = new Pose(spawn.position, Quaternion.LookRotation(-fwd, Vector3.up));
+            return InteropStructs.ToOpenXrPose(unityPose);
+        }
+
+        private static ThreeOSPose MindPalaceFixturePose(ThreeOSPose origin, float azimuthDeg)
+        {
+            var q = new Quaternion(origin.orientation.x, origin.orientation.y, origin.orientation.z,
+                origin.orientation.w);
             var fwd = q * new Vector3(0f, 0f, -1f);
             fwd.y = 0f;
             if (fwd.sqrMagnitude < 1e-6f)
@@ -492,9 +568,9 @@ namespace ThreeOS
             var rad = azimuthDeg * Mathf.Deg2Rad;
             var dir = (Mathf.Cos(rad) * fwd + Mathf.Sin(rad) * right).normalized;
             var pos = new Vector3(
-                head.position.x + dir.x * MindPalaceFixtureRangeM,
-                head.position.y + MindPalaceFixtureHeightM,
-                head.position.z + dir.z * MindPalaceFixtureRangeM);
+                origin.position.x + dir.x * MindPalaceFixtureRangeM,
+                origin.position.y + MindPalaceFixtureHeightM,
+                origin.position.z + dir.z * MindPalaceFixtureRangeM);
             var face = -dir;
             var yaw = Mathf.Atan2(face.x, -face.z);
             var half = yaw * 0.5f;
@@ -508,13 +584,693 @@ namespace ThreeOS
             };
         }
 
+        void CapturePalaceEntityIds()
+        {
+            // Do not clear _entityMindPalace — LoadDemoDirectory already tagged mp membership.
+            _palaceEntityIds.Clear();
+            var count = _bridge.StorageItemCount();
+            for (uint i = 0; i < count; i++)
+            {
+                if (!_bridge.TryGetWorkspaceItem(i, out var item))
+                    continue;
+                _palaceEntityIds.Add(item.entityId);
+            }
+        }
+
+        /// <summary>
+        /// Final Demo 7.8.b — async Palace reveal. Must not run sync on the wipe settle frame
+        /// (Quest dies on a multi-second Documents listing + RebuildViews hitch).
+        /// </summary>
+        public IEnumerator RevealPalaceAtSpawnRoutine(Transform spawn)
+        {
+            if (_bridge == null || !_bridge.IsLoaded)
+            {
+                Debug.LogError("[3OS] RevealPalace: bridge not loaded");
+                yield break;
+            }
+
+            if (spawn == null)
+            {
+                Debug.LogError("[3OS] RevealPalace: spawn is null");
+                yield break;
+            }
+
+            // Let wipe settle / compositor breathe before FS work.
+            yield return null;
+            yield return null;
+
+            // Prefer Act I precache; wait briefly if still warming.
+            var waitPc = Time.realtimeSinceStartup + 6f;
+            while (!_palaceNamesPrecached && !string.IsNullOrEmpty(_demoRoot) &&
+                   Time.realtimeSinceStartup < waitPc)
+                yield return null;
+
+            if (_palaceFixtureLoaded && _palaceSoftDismissed)
+            {
+                _palacePendingScaleIn = true;
+                if (!TryRestorePalaceField(spawn))
+                    Debug.LogError($"[3OS] Palace restore failed: {_status}");
+                HidePalaceGlyphsPendingScaleIn(_mrPersistedSelectionId);
+                yield break;
+            }
+
+            if (_palaceFixtureLoaded && !_palaceSoftDismissed)
+                yield break;
+
+            var origin = PoseFromSpawnTransform(spawn);
+            yield return LoadDualMindPalaceFixtureRoutine(origin);
+            if (!_palaceFixtureLoaded)
+            {
+                Debug.LogError($"[3OS] Palace fixture load failed: {_status}");
+                yield break;
+            }
+
+            // Hide before first render frame — SyncViews must not flash full-size glyphs.
+            _palacePendingScaleIn = true;
+            yield return RebuildViewsSpreadRoutine(viewsPerFrame: 1);
+            HidePalaceGlyphsPendingScaleIn(_mrPersistedSelectionId);
+        }
+
+        /// <summary>Sync wrapper kept for non-Final-Demo callers; prefer the routine on device.</summary>
+        public bool TryRevealPalaceAtSpawn(Transform spawn)
+        {
+            if (_bridge == null || !_bridge.IsLoaded || spawn == null)
+                return false;
+            if (_palaceFixtureLoaded && _palaceSoftDismissed)
+                return TryRestorePalaceField(spawn);
+            if (_palaceFixtureLoaded && !_palaceSoftDismissed)
+                return true;
+            var origin = PoseFromSpawnTransform(spawn);
+            if (!LoadDualMindPalaceFixture(origin))
+                return false;
+            RebuildViews();
+            return true;
+        }
+
+        IEnumerator LoadDualMindPalaceFixtureRoutine(ThreeOSPose origin)
+        {
+            _bridge.StorageClear();
+            _bridge.MindPalaceClear();
+            _palaceEntityIds.Clear();
+            _entityMindPalace.Clear();
+            _mrPersistedSelectionId = 0;
+            _mrPersistedOriginalMpId = 0;
+            yield return null;
+
+            var leftAnchor = MindPalaceFixturePose(origin, -MindPalaceFixtureAzimuthDeg);
+            var rightAnchor = MindPalaceFixturePose(origin, MindPalaceFixtureAzimuthDeg);
+            if (!_bridge.TryRegisterMindPalace(DemoFolderName, leftAnchor, out var mpL) ||
+                !_bridge.TryRegisterMindPalace(DemoFolderName2, rightAnchor, out var mpR))
+            {
+                _status = $"mind palace register failed: {_bridge.LastError}";
+                yield break;
+            }
+
+            _mpLeftId = mpL;
+            _mpRightId = mpR;
+            _mpLeftAnchor = leftAnchor;
+            _mpRightAnchor = rightAnchor;
+            yield return null;
+
+            // Chunk FS + StorageAdd across frames (1 item/frame) — sync LoadDemoDirectory
+            // still freezes the HMD ~2s on Quest Documents roots.
+            var ok1 = false;
+            yield return LoadDemoDirectoryRoutine(_demoRoot, mpL, clearFirst: false,
+                addsPerFrame: 1, skipChildCounts: true, ok => ok1 = ok);
+            if (!ok1)
+                yield break;
+            Debug.Log("[3OS] Palace Demo1 chunk-loaded");
+            yield return null;
+
+            var ok2 = true;
+            if (!string.IsNullOrEmpty(_demoRoot2))
+            {
+                yield return LoadDemoDirectoryRoutine(_demoRoot2, mpR, clearFirst: false,
+                    addsPerFrame: 1, skipChildCounts: true, ok => ok2 = ok);
+                if (!ok2)
+                    Debug.LogWarning($"[3OS] Demo2 load weak: {_status} — continuing with MindPalace L only");
+            }
+
+            CapturePalaceEntityIds();
+            yield return null;
+            if (!_bridge.LayoutMindPalace(mpL, leftAnchor))
+                Debug.LogWarning($"[3OS] layout MindPalace L: {_bridge.LastError}");
+            yield return null;
+            yield return null;
+            if (!_bridge.LayoutMindPalace(mpR, rightAnchor))
+                Debug.LogWarning($"[3OS] layout MindPalace R: {_bridge.LastError}");
+            yield return null;
+            _palaceFixtureLoaded = true;
+            _palaceSoftDismissed = false;
+            Debug.Log($"[3OS] dual-mind-palace fixture L={mpL} R={mpR} entities={_palaceEntityIds.Count}");
+            yield return null;
+        }
+
+        IEnumerator PrecachePalaceDirectoryNamesRoutine()
+        {
+            // Spread listings across many frames while user is still in MR Act I.
+            yield return new WaitForSecondsRealtime(0.5f);
+            yield return PrecacheOneRootRoutine(_demoRoot, files => _precacheFiles1 = files,
+                dirs => _precacheDirs1 = dirs);
+            yield return null;
+            yield return PrecacheOneRootRoutine(_demoRoot2, files => _precacheFiles2 = files,
+                dirs => _precacheDirs2 = dirs);
+            _palaceNamesPrecached = true;
+            Debug.Log(
+                $"[3OS] Palace names precached " +
+                $"d1=f{_precacheFiles1?.Count ?? 0}/d{_precacheDirs1?.Count ?? 0} " +
+                $"d2=f{_precacheFiles2?.Count ?? 0}/d{_precacheDirs2?.Count ?? 0}");
+        }
+
+        IEnumerator PrecacheOneRootRoutine(string root, Action<List<string>> setFiles,
+            Action<List<string>> setDirs)
+        {
+            var files = new List<string>();
+            var dirs = new List<string>();
+            if (string.IsNullOrEmpty(root))
+            {
+                setFiles?.Invoke(files);
+                setDirs?.Invoke(dirs);
+                yield break;
+            }
+
+            yield return null;
+            try
+            {
+                foreach (var name in ThreeOSAndroidStorage.ListFileNames(root))
+                    files.Add(name);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[3OS] precache ListFileNames: {ex.Message}");
+            }
+
+            yield return null;
+            try
+            {
+                foreach (var name in ThreeOSAndroidStorage.ListDirectoryNames(root))
+                    dirs.Add(name);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[3OS] precache ListDirectoryNames: {ex.Message}");
+            }
+
+            yield return null;
+            foreach (var probe in new[] { "simple.glb", "simple.gltf", "marker.txt" })
+            {
+                if (ThreeOSAndroidStorage.TryProbeFileName(root, probe) &&
+                    !files.Exists(n => string.Equals(n, probe, StringComparison.OrdinalIgnoreCase)))
+                    files.Add(probe);
+            }
+
+            files.Sort(StringComparer.OrdinalIgnoreCase);
+            dirs.Sort(StringComparer.OrdinalIgnoreCase);
+            setFiles?.Invoke(files);
+            setDirs?.Invoke(dirs);
+            yield return null;
+        }
+
+        /// <summary>
+        /// Chunked demo-root ingest for Final Demo Palace. Uses Act I precache when available.
+        /// Skips per-folder child scans; adds ≤addsPerFrame items/frame.
+        /// </summary>
+        IEnumerator LoadDemoDirectoryRoutine(string root, ulong mindPalaceId, bool clearFirst,
+            int addsPerFrame, bool skipChildCounts, Action<bool> done)
+        {
+            if (clearFirst)
+                _bridge.StorageClear();
+            if (string.IsNullOrEmpty(root) ||
+                (!Directory.Exists(root) && !ThreeOSAndroidStorage.Exists(root)))
+            {
+                _status = $"demo dir missing: {root}";
+                Debug.LogError($"[3OS] {_status}");
+                done?.Invoke(false);
+                yield break;
+            }
+
+            yield return null;
+
+            List<string> fileNames;
+            List<string> dirNames;
+            var usePrecache = _palaceNamesPrecached &&
+                              ((root == _demoRoot && _precacheDirs1 != null) ||
+                               (root == _demoRoot2 && _precacheDirs2 != null));
+            if (usePrecache && root == _demoRoot)
+            {
+                fileNames = new List<string>(_precacheFiles1 ?? new List<string>());
+                dirNames = new List<string>(_precacheDirs1 ?? new List<string>());
+                Debug.Log($"[3OS] using precache for Demo1 ({fileNames.Count}f/{dirNames.Count}d)");
+            }
+            else if (usePrecache && root == _demoRoot2)
+            {
+                fileNames = new List<string>(_precacheFiles2 ?? new List<string>());
+                dirNames = new List<string>(_precacheDirs2 ?? new List<string>());
+                Debug.Log($"[3OS] using precache for Demo2 ({fileNames.Count}f/{dirNames.Count}d)");
+            }
+            else
+            {
+                fileNames = new List<string>();
+                dirNames = new List<string>();
+                try
+                {
+                    foreach (var name in ThreeOSAndroidStorage.ListFileNames(root))
+                        fileNames.Add(name);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[3OS] ListFileNames({root}): {ex.Message}");
+                }
+
+                yield return null;
+                try
+                {
+                    foreach (var name in ThreeOSAndroidStorage.ListDirectoryNames(root))
+                        dirNames.Add(name);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[3OS] ListDirectoryNames({root}): {ex.Message}");
+                }
+
+                yield return null;
+                foreach (var probe in new[] { "simple.glb", "simple.gltf", "marker.txt" })
+                {
+                    if (ThreeOSAndroidStorage.TryProbeFileName(root, probe) &&
+                        !fileNames.Exists(n => string.Equals(n, probe, StringComparison.OrdinalIgnoreCase)))
+                        fileNames.Add(probe);
+                }
+
+                fileNames.Sort(StringComparer.OrdinalIgnoreCase);
+                dirNames.Sort(StringComparer.OrdinalIgnoreCase);
+            }
+
+            yield return null;
+
+            var per = Mathf.Max(1, addsPerFrame);
+            var added = 0;
+            var boxes = 0;
+            var burst = 0;
+
+            for (var i = 0; i < fileNames.Count; i++)
+            {
+                var name = fileNames[i];
+                if (!_bridge.StorageAddObject(name, name, out var eid))
+                {
+                    _status = $"add object failed: {_bridge.LastError}";
+                    Debug.LogError($"[3OS] {_status}");
+                    done?.Invoke(false);
+                    yield break;
+                }
+
+                if (mindPalaceId != 0)
+                {
+                    _bridge.SetMindPalaceRoot(eid, mindPalaceId);
+                    _entityMindPalace[eid] = mindPalaceId;
+                }
+
+                added++;
+                burst++;
+                if (burst >= per)
+                {
+                    burst = 0;
+                    yield return null;
+                }
+            }
+
+            for (var i = 0; i < dirNames.Count; i++)
+            {
+                var name = dirNames[i];
+                var childCount = skipChildCounts
+                    ? 0u
+                    : CountFolderContentsShallow(Path.Combine(root, name));
+                if (!_bridge.StorageAddBox(name, name, childCount, out var bid))
+                {
+                    _status = $"add box failed: {_bridge.LastError}";
+                    Debug.LogError($"[3OS] {_status}");
+                    done?.Invoke(false);
+                    yield break;
+                }
+
+                if (mindPalaceId != 0)
+                {
+                    _bridge.SetMindPalaceRoot(bid, mindPalaceId);
+                    _entityMindPalace[bid] = mindPalaceId;
+                }
+
+                added++;
+                boxes++;
+                burst++;
+                if (burst >= per)
+                {
+                    burst = 0;
+                    yield return null;
+                }
+            }
+
+            if (added == 0)
+            {
+                _status = $"demo dir empty: {root}";
+                Debug.LogError($"[3OS] {_status}");
+                done?.Invoke(false);
+                yield break;
+            }
+
+            _status = $"listed {added} ({boxes} folders)";
+            Debug.Log($"[3OS] {_status} from {root} (chunked files={fileNames.Count} dirs={dirNames.Count})");
+            done?.Invoke(true);
+        }
+
+        IEnumerator RebuildViewsSpreadRoutine(int viewsPerFrame)
+        {
+            _expanded.TeardownAllExpandedBoxes(collapseKernel: true);
+            foreach (var kv in _glyphs.Views)
+                _glyphs.DestroyGlyphView(kv.Value);
+            _glyphs.Views.Clear();
+            _glyphs.ClearGhostViews();
+            _dismiss.ClearPortalDismissUi();
+            yield return null;
+
+            var per = Mathf.Max(1, viewsPerFrame);
+            var made = 0;
+            var count = _bridge.StorageItemCount();
+            for (uint i = 0; i < count; i++)
+            {
+                if (!_bridge.TryGetWorkspaceItem(i, out var item))
+                    continue;
+                if ((item.flags & 1u) == 0)
+                    continue;
+                var view = _glyphs.CreateView(item);
+                _glyphs.Views[item.entityId] = view;
+                // Pending scale-in: never allow a full-size render before the pivot tween.
+                if (_palacePendingScaleIn && view.Root != null &&
+                    item.entityId != _mrPersistedSelectionId)
+                    view.Root.SetActive(false);
+                made++;
+                if (made % per == 0)
+                    yield return null;
+            }
+
+            MarkStorageVisualsDirty();
+            Debug.Log($"[3OS] Palace RebuildViews spread done views={_glyphs.Views.Count}");
+        }
+
+        /// <summary>Re-show soft-dismissed Palace field (MR→VR again) without wiping MR selection.</summary>
+        public bool TryRestorePalaceField(Transform spawn)
+        {
+            if (!_palaceFixtureLoaded || _bridge == null)
+                return false;
+            var origin = spawn != null ? PoseFromSpawnTransform(spawn) : default;
+            if (spawn != null)
+            {
+                _mpLeftAnchor = MindPalaceFixturePose(origin, -MindPalaceFixtureAzimuthDeg);
+                _mpRightAnchor = MindPalaceFixturePose(origin, MindPalaceFixtureAzimuthDeg);
+            }
+
+            for (var i = 0; i < _palaceEntityIds.Count; i++)
+            {
+                var id = _palaceEntityIds[i];
+                if (id == 0 || id == _mrPersistedSelectionId)
+                    continue;
+                _bridge.StorageSetInField(id, true);
+                if (_entityMindPalace.TryGetValue(id, out var mp) && mp != 0)
+                    _bridge.SetMindPalaceRoot(id, mp);
+            }
+
+            if (_mpLeftId != 0)
+                _bridge.LayoutMindPalace(_mpLeftId, _mpLeftAnchor);
+            if (_mpRightId != 0)
+                _bridge.LayoutMindPalace(_mpRightId, _mpRightAnchor);
+
+            // Re-link persisted selection to original Palace centroid; keep world pose (anim lock).
+            if (_mrPersistedSelectionId != 0)
+            {
+                if (_mrPersistedOriginalMpId != 0)
+                    _bridge.SetMindPalaceRoot(_mrPersistedSelectionId, _mrPersistedOriginalMpId);
+                _bridge.StorageSetInField(_mrPersistedSelectionId, true);
+                _animLockedIds.Add(_mrPersistedSelectionId);
+                if (_glyphs.Views.TryGetValue(_mrPersistedSelectionId, out var selView) &&
+                    selView.Root != null)
+                {
+                    selView.Root.SetActive(true);
+                    selView.Root.transform.SetPositionAndRotation(_mrPersistedWorldPos,
+                        _mrPersistedWorldRot);
+                }
+            }
+
+            RebuildViewsPreservingPersisted();
+            _palaceSoftDismissed = false;
+            return true;
+        }
+
+        void RebuildViewsPreservingPersisted()
+        {
+            GameObject persistRoot = null;
+            ThreeOSGlyphView persistView = null;
+            if (_mrPersistedSelectionId != 0 &&
+                _glyphs.Views.TryGetValue(_mrPersistedSelectionId, out persistView) &&
+                persistView.Root != null)
+            {
+                persistRoot = persistView.Root;
+                persistRoot.transform.SetParent(null, true);
+                _glyphs.Views.Remove(_mrPersistedSelectionId);
+            }
+
+            RebuildViews();
+
+            if (_mrPersistedSelectionId != 0 && persistRoot != null)
+            {
+                if (_glyphs.Views.TryGetValue(_mrPersistedSelectionId, out var dup) &&
+                    dup.Root != null && dup.Root != persistRoot)
+                    _glyphs.DestroyGlyphView(dup);
+                if (persistView != null)
+                {
+                    persistView.Root = persistRoot;
+                    _glyphs.Views[_mrPersistedSelectionId] = persistView;
+                }
+
+                persistRoot.SetActive(true);
+                persistRoot.transform.SetPositionAndRotation(_mrPersistedWorldPos, _mrPersistedWorldRot);
+                _animLockedIds.Add(_mrPersistedSelectionId);
+            }
+        }
+
+        /// <summary>7.8.b / 7.8.c — scale each MindPalace node cluster from centroid.</summary>
+        public IEnumerator AnimatePalaceClustersScale(float fromScale, float toScale, float duration,
+            ulong excludeEntityId = 0)
+        {
+            if (_palaceClusterAnimBusy)
+                yield break;
+            _palaceClusterAnimBusy = true;
+            try
+            {
+                var clusters = BuildPalaceClusterIdLists(excludeEntityId);
+                if (clusters.Count == 0)
+                    yield break;
+
+                const float eps = 0.001f;
+                var start = Mathf.Max(eps, fromScale);
+                var end = Mathf.Max(eps, toScale);
+                var pivots = new List<Transform>(clusters.Count);
+                foreach (var ids in clusters)
+                {
+                    if (!TryMakeClusterPivot(ids, start, out var pivot))
+                        continue;
+                    pivots.Add(pivot);
+                }
+
+                var dur = Mathf.Max(0.05f, duration);
+                var t = 0f;
+                while (t < dur)
+                {
+                    t += Time.unscaledDeltaTime;
+                    var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(t / dur));
+                    var s = Mathf.Lerp(start, end, u);
+                    for (var i = 0; i < pivots.Count; i++)
+                    {
+                        if (pivots[i] != null)
+                            pivots[i].localScale = Vector3.one * s;
+                    }
+
+                    yield return null;
+                }
+
+                for (var i = 0; i < pivots.Count; i++)
+                {
+                    var pivot = pivots[i];
+                    if (pivot == null)
+                        continue;
+                    pivot.localScale = Vector3.one * end;
+                    var childCount = pivot.childCount;
+                    for (var c = childCount - 1; c >= 0; c--)
+                    {
+                        var child = pivot.GetChild(c);
+                        child.SetParent(null, true);
+                        if (Mathf.Abs(end - 1f) < 1e-3f)
+                            child.localScale = Vector3.one;
+                    }
+
+                    Destroy(pivot.gameObject);
+                }
+
+                _animLockedIds.Clear();
+                if (_mrPersistedSelectionId != 0)
+                    _animLockedIds.Add(_mrPersistedSelectionId);
+            }
+            finally
+            {
+                _palaceClusterAnimBusy = false;
+                // Scale-in finished — SyncViews may activate at full size again.
+                if (toScale >= fromScale && toScale >= 0.99f)
+                    _palacePendingScaleIn = false;
+                MarkStorageVisualsDirty();
+            }
+        }
+
+        List<List<ulong>> BuildPalaceClusterIdLists(ulong excludeEntityId)
+        {
+            var byMp = new Dictionary<ulong, List<ulong>>();
+            foreach (var kv in _entityMindPalace)
+            {
+                var id = kv.Key;
+                if (id == 0 || id == excludeEntityId)
+                    continue;
+                // Include inactive roots (hidden pending scale-in).
+                if (!_glyphs.Views.TryGetValue(id, out var view) || view.Root == null)
+                    continue;
+                if (!byMp.TryGetValue(kv.Value, out var list))
+                {
+                    list = new List<ulong>();
+                    byMp[kv.Value] = list;
+                }
+
+                list.Add(id);
+            }
+
+            // Fallback: single cluster of all palace glyphs if tagging failed.
+            if (byMp.Count == 0)
+            {
+                var all = new List<ulong>();
+                for (var i = 0; i < _palaceEntityIds.Count; i++)
+                {
+                    var id = _palaceEntityIds[i];
+                    if (id == 0 || id == excludeEntityId)
+                        continue;
+                    if (_glyphs.Views.TryGetValue(id, out var view) && view.Root != null)
+                        all.Add(id);
+                }
+
+                if (all.Count > 0)
+                    return new List<List<ulong>> { all };
+            }
+
+            return new List<List<ulong>>(byMp.Values);
+        }
+
+        bool TryMakeClusterPivot(List<ulong> ids, float startScale, out Transform pivot)
+        {
+            pivot = null;
+            var centroid = Vector3.zero;
+            var n = 0;
+            for (var i = 0; i < ids.Count; i++)
+            {
+                if (!_glyphs.Views.TryGetValue(ids[i], out var view) || view.Root == null)
+                    continue;
+                centroid += view.Root.transform.position;
+                n++;
+            }
+
+            if (n == 0)
+                return false;
+            centroid /= n;
+            var go = new GameObject("3OS_PalaceClusterPivot");
+            go.transform.SetPositionAndRotation(centroid, Quaternion.identity);
+            go.transform.localScale = Vector3.one;
+            for (var i = 0; i < ids.Count; i++)
+            {
+                var id = ids[i];
+                if (!_glyphs.Views.TryGetValue(id, out var view) || view.Root == null)
+                    continue;
+                _animLockedIds.Add(id);
+                view.Root.SetActive(true);
+                view.Root.transform.localScale = Vector3.one;
+                view.Root.transform.SetParent(go.transform, true);
+                view.Root.transform.localScale = Vector3.one;
+            }
+
+            go.transform.localScale = Vector3.one * startScale;
+            pivot = go.transform;
+            return true;
+        }
+
+        /// <summary>Hide Palace glyph roots until cluster scale-in parents them (no full-size flash).</summary>
+        public void HidePalaceGlyphsPendingScaleIn(ulong excludeEntityId = 0)
+        {
+            _palacePendingScaleIn = true;
+            for (var i = 0; i < _palaceEntityIds.Count; i++)
+            {
+                var id = _palaceEntityIds[i];
+                if (id == 0 || id == excludeEntityId)
+                    continue;
+                if (_glyphs.Views.TryGetValue(id, out var view) && view.Root != null)
+                    view.Root.SetActive(false);
+            }
+        }
+
+        /// <summary>
+        /// 7.8.c — scale-out non-selected clusters, soft-dismiss field, persist selection at MR anchor.
+        /// </summary>
+        public IEnumerator DismissPalaceToMr(Transform mrAnchorSpawn)
+        {
+            ulong keepId = 0;
+            if (_bridge != null && _bridge.TryGetSelection(out var sel) && sel != 0)
+                keepId = sel;
+
+            // Detach selection from cluster before scale-out.
+            if (keepId != 0 && _glyphs.Views.TryGetValue(keepId, out var keepView) &&
+                keepView.Root != null)
+            {
+                keepView.Root.transform.SetParent(null, true);
+                _mrPersistedWorldPos = keepView.Root.transform.position;
+                _mrPersistedWorldRot = keepView.Root.transform.rotation;
+                _mrPersistedSelectionId = keepId;
+                _entityMindPalace.TryGetValue(keepId, out _mrPersistedOriginalMpId);
+                _bridge.SetMindPalaceRoot(keepId, 0);
+                _animLockedIds.Add(keepId);
+                Debug.Log(
+                    $"[3OS] MR persist selection={keepId} mpWas={_mrPersistedOriginalMpId} " +
+                    $"anchor={(mrAnchorSpawn != null ? mrAnchorSpawn.name : "null")}");
+            }
+            else
+            {
+                _mrPersistedSelectionId = 0;
+                _mrPersistedOriginalMpId = 0;
+            }
+
+            yield return AnimatePalaceClustersScale(1f, 0.001f, PalaceClusterScaleSeconds, keepId);
+
+            for (var i = 0; i < _palaceEntityIds.Count; i++)
+            {
+                var id = _palaceEntityIds[i];
+                if (id == 0 || id == keepId)
+                    continue;
+                _bridge.StorageSetInField(id, false);
+                if (_glyphs.Views.TryGetValue(id, out var view) && view.Root != null)
+                    view.Root.SetActive(false);
+            }
+
+            _palaceSoftDismissed = true;
+            MarkStorageVisualsDirty();
+        }
+
         private bool LoadDemoDirectory(string root) =>
-            LoadDemoDirectory(root, mindPalaceId: 0, clearFirst: true);
+            LoadDemoDirectory(root, mindPalaceId: 0, clearFirst: true, cheapChildCounts: false);
 
         internal bool LoadDemoDirectoryPublic(string root, ulong mindPalaceId, bool clearFirst) =>
-            LoadDemoDirectory(root, mindPalaceId, clearFirst);
+            LoadDemoDirectory(root, mindPalaceId, clearFirst, cheapChildCounts: false);
 
-        private bool LoadDemoDirectory(string root, ulong mindPalaceId, bool clearFirst)
+        private bool LoadDemoDirectory(string root, ulong mindPalaceId, bool clearFirst,
+            bool cheapChildCounts = false)
         {
             if (clearFirst)
                 _bridge.StorageClear();
@@ -562,22 +1318,36 @@ namespace ThreeOS
                         Debug.LogError($"[3OS] {_status}");
                         return false;
                     }
-                    if (mindPalaceId != 0 && !_bridge.SetMindPalaceRoot(eid, mindPalaceId))
-                        Debug.LogWarning($"[3OS] set MindPalace failed: {_bridge.LastError}");
+                    if (mindPalaceId != 0)
+                    {
+                        if (!_bridge.SetMindPalaceRoot(eid, mindPalaceId))
+                            Debug.LogWarning($"[3OS] set MindPalace failed: {_bridge.LastError}");
+                        _entityMindPalace[eid] = mindPalaceId;
+                    }
+
                     added++;
                 }
                 foreach (var name in dirs)
                 {
                     var dirPath = Path.Combine(root, name);
-                    var childCount = CountFolderContents(dirPath, name, root);
+                    // Full CountFolderContents fans across candidate roots — too slow on Quest
+                    // for Final Demo Palace reveal (caused wipe-settle hitch / process kill).
+                    var childCount = cheapChildCounts
+                        ? CountFolderContentsShallow(dirPath)
+                        : CountFolderContents(dirPath, name, root);
                     if (!_bridge.StorageAddBox(name, name, childCount, out var bid))
                     {
                         _status = $"add box failed: {_bridge.LastError}";
                         Debug.LogError($"[3OS] {_status}");
                         return false;
                     }
-                    if (mindPalaceId != 0 && !_bridge.SetMindPalaceRoot(bid, mindPalaceId))
-                        Debug.LogWarning($"[3OS] set MindPalace failed: {_bridge.LastError}");
+                    if (mindPalaceId != 0)
+                    {
+                        if (!_bridge.SetMindPalaceRoot(bid, mindPalaceId))
+                            Debug.LogWarning($"[3OS] set MindPalace failed: {_bridge.LastError}");
+                        _entityMindPalace[bid] = mindPalaceId;
+                    }
+
                     added++;
                     boxes++;
                 }
@@ -598,6 +1368,18 @@ namespace ThreeOS
             _status = $"listed {added} ({boxes} folders)";
             Debug.Log($"[3OS] {_status} from {root} (files={files.Count} dirs={dirs.Count})");
             return true;
+        }
+
+        private static uint CountFolderContentsShallow(string dirPath)
+        {
+            uint n = 0;
+            if (string.IsNullOrEmpty(dirPath))
+                return 0;
+            foreach (var _ in ThreeOSAndroidStorage.ListFileNames(dirPath))
+                n++;
+            foreach (var _ in ThreeOSAndroidStorage.ListDirectoryNames(dirPath))
+                n++;
+            return n;
         }
 
         private uint CountFolderContents(string dirPath, string folderName, string primaryRoot)
@@ -650,7 +1432,11 @@ namespace ThreeOS
                     continue;
                 if ((item.flags & 1u) == 0)
                     continue;
-                _glyphs.Views[item.entityId] = _glyphs.CreateView(item);
+                var view = _glyphs.CreateView(item);
+                _glyphs.Views[item.entityId] = view;
+                if (_palacePendingScaleIn && view.Root != null &&
+                    item.entityId != _mrPersistedSelectionId)
+                    view.Root.SetActive(false);
             }
 
             MarkStorageVisualsDirty();

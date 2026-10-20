@@ -34,6 +34,12 @@ namespace ThreeOS
         private readonly List<InteropVoodooEnclosureBox> _boxScratch =
             new List<InteropVoodooEnclosureBox>(MaxEnclosureBoxes);
 
+        /// <summary>
+        /// When false, WorldMesh enclosure OBBs are not published (Palace / VR).
+        /// Final Demo 7.8.a — MR-only collision.
+        /// </summary>
+        public bool EnclosurePublishingEnabled { get; set; } = true;
+
         private sealed class HandViz
         {
             public ThreeOSArrowVisual Arrow;
@@ -121,8 +127,33 @@ namespace ThreeOS
             UpdatePortals();
         }
 
+        /// <summary>
+        /// Enable/disable all WorldMesh* colliders and gate enclosure publish (7.8.a).
+        /// </summary>
+        public void SetWorldMeshCollisionActive(bool active)
+        {
+            EnclosurePublishingEnabled = active;
+            RefreshWorldMeshColliders();
+            for (var i = 0; i < _worldMeshColliders.Count; i++)
+            {
+                var col = _worldMeshColliders[i];
+                if (col != null)
+                    col.enabled = active;
+            }
+
+            if (!active && _bridge != null && _bridge.IsLoaded && _bridge.NativeAbiVersion >= 6)
+                _bridge.SetVoodooEnclosureBoxes(null);
+        }
+
         private void PublishWorldMeshBoxes()
         {
+            if (!EnclosurePublishingEnabled)
+            {
+                if (_bridge != null && _bridge.IsLoaded && _bridge.NativeAbiVersion >= 6)
+                    _bridge.SetVoodooEnclosureBoxes(null);
+                return;
+            }
+
             if (Time.unscaledTime >= _nextMeshRefresh)
             {
                 RefreshWorldMeshColliders();
@@ -361,6 +392,14 @@ namespace ThreeOS
                     Destroy(col);
                 }
 
+                var mr = go.GetComponent<MeshRenderer>();
+                if (mr != null && _matSnapIdle != null)
+                {
+                    mr.sharedMaterial = _matSnapIdle;
+                    mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    mr.receiveShadows = false;
+                }
+
                 go.SetActive(false);
                 viz.SnapDots.Add(go.transform);
             }
@@ -542,9 +581,10 @@ namespace ThreeOS
             lr.widthMultiplier = FarWireWidthM;
             lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             lr.receiveShadows = false;
-            lr.material = CreateLineMaterial(color);
+            lr.sharedMaterial = CreateLineMaterial(color);
             lr.startColor = color;
             lr.endColor = color;
+            lr.sortingOrder = 40;
             go.SetActive(false);
             return go.transform;
         }
@@ -588,12 +628,18 @@ namespace ThreeOS
                          Shader.Find("Unlit/Color");
             var mat = new Material(shader);
             mat.color = c;
+            if (mat.HasProperty("_Color"))
+            {
+                mat.SetColor("_Color", c);
+            }
+
             if (mat.HasProperty("_BaseColor"))
             {
                 mat.SetColor("_BaseColor", c);
             }
 
-            mat.renderQueue = 3000;
+            // Match Final Demo Palace keep-list (5100) so wires/snap clear Overlay sky.
+            mat.renderQueue = 5100;
             return mat;
         }
     }

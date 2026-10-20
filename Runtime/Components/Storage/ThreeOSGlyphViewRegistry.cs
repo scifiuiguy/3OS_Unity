@@ -53,8 +53,10 @@ namespace ThreeOS
         private List<ulong> CollectChildIds(ulong boxId) => _host.Expanded.CollectChildIds(boxId);
 
         /// <summary>
-        /// Face labels toward the HMD only for the selected far-field glyph and all
-        /// voodoo ghost glyphs. Other workspace labels stay put (FPS).
+        /// Face labels toward the HMD. Default: selected far-field + all voodoo ghosts.
+        /// When <see cref="ThreeOSStorageController.BillboardAllFarFieldLabels"/> (Final Demo
+        /// Palace), billboard every far glyph label so fixed-orientation TextMesh backfaces
+        /// do not vanish based on head yaw.
         /// </summary>
         internal void BillboardSelectedAndVoodooLabels(ulong selectedId)
         {
@@ -66,6 +68,12 @@ namespace ThreeOS
 
             var camPos = cam.transform.position;
             BillboardLabelSet(_ghostViews, camPos);
+            if (ThreeOSStorageController.BillboardAllFarFieldLabels)
+            {
+                BillboardLabelSet(_views, camPos);
+                return;
+            }
+
             if (selectedId != 0 && _views.TryGetValue(selectedId, out var view) &&
                 view.Root != null && view.Root.activeInHierarchy)
             {
@@ -436,7 +444,8 @@ namespace ThreeOS
             }
 
             mat.enableInstancing = enableInstancing;
-            mat.renderQueue = 3000;
+            // Match Final Demo Palace keep-list (5100) so glyphs clear Overlay sky.
+            mat.renderQueue = 5100;
             return mat;
         }
 
@@ -630,21 +639,23 @@ namespace ThreeOS
                 tm.font = Font.CreateDynamicFontFromOSFont(new[] { "Arial", "Helvetica", "sans-serif" }, 64);
             }
 
-            if (tm.font != null)
-            {
-                var mrFont = go.GetComponent<MeshRenderer>();
-                if (mrFont != null)
-                {
-                    mrFont.sharedMaterial = tm.font.material;
-                }
-            }
-
             // Keep labels readable in front of transparent glyphs.
             var mr = go.GetComponent<MeshRenderer>();
             if (mr != null)
             {
                 mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 mr.receiveShadows = false;
+                // Instance font mat + Cull Off: shared GUI/Text backfaces were vanishing with
+                // head yaw (same class of view-dependent disappear as early selection glow).
+                if (tm.font != null && tm.font.material != null)
+                {
+                    // Instance so queue/cull tweaks do not mutate the shared font asset.
+                    var mat = new Material(tm.font.material);
+                    mat.name = "3OS_GlyphLabelFont";
+                    // Match Final Demo Palace keep-list queue (5100) so labels clear the sky Overlay.
+                    mat.renderQueue = 5100;
+                    mr.material = mat;
+                }
             }
 
             return tm;
@@ -680,6 +691,15 @@ namespace ThreeOS
                 {
                     _views[item.entityId] = CreateView(item);
                     view = _views[item.entityId];
+                }
+
+                // Pending Palace scale-in: stay inactive so SyncViews cannot flash full-size
+                // glyphs for a frame before AnimatePalaceClustersScale parents them.
+                if (_host.PalacePendingScaleIn && _host.IsPalaceEntity(item.entityId) &&
+                    item.entityId != _host.MrPersistedSelectionId && !animLocked)
+                {
+                    view.Root.SetActive(false);
+                    continue;
                 }
 
                 view.Root.SetActive(true);
@@ -815,17 +835,34 @@ namespace ThreeOS
                 GhostDisplayColor(item, view.CutOpacityDuck),
                 blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
         }
+        /// <summary>
+        /// Translucent shell for dismiss X / scissors. Prefer Resources
+        /// <c>3OS/GlyphDefault</c> (same shader that draws Palace GLB cubes on Quest) —
+        /// Shader.Find-only mats were invisible on device spheres.
+        /// </summary>
         internal static Material CreateTranslucentUnlitMaterial(Color color)
         {
-            var shader = Shader.Find("Sprites/Default")
-                         ?? Shader.Find("Unlit/Transparent")
-                         ?? Shader.Find("Legacy Shaders/Transparent/Diffuse")
-                         ?? Shader.Find("Universal Render Pipeline/Unlit")
-                         ?? Shader.Find("Unlit/Color");
-            var mat = new Material(shader);
-            if (mat.HasProperty("_Color"))
+            Material mat = null;
+            var glyphTmpl = Resources.Load<Material>("3OS/GlyphDefault");
+            if (glyphTmpl != null && glyphTmpl.shader != null)
             {
-                mat.SetColor("_Color", color);
+                mat = new Material(glyphTmpl);
+            }
+            else
+            {
+                var eqTmpl = Resources.Load<Material>("3OS/EqBar");
+                if (eqTmpl != null && eqTmpl.shader != null)
+                {
+                    mat = new Material(eqTmpl);
+                }
+            }
+
+            if (mat == null)
+            {
+                var shader = Shader.Find("ThreeOS/Glyph")
+                             ?? Shader.Find("ThreeOS/EqBar")
+                             ?? Shader.Find("Unlit/Color");
+                mat = new Material(shader);
             }
 
             if (mat.HasProperty("_BaseColor"))
@@ -833,17 +870,19 @@ namespace ThreeOS
                 mat.SetColor("_BaseColor", color);
             }
 
-            mat.color = color;
-            if (mat.HasProperty("_Surface"))
+            if (mat.HasProperty("_Color"))
             {
-                mat.SetFloat("_Surface", 1f);
+                mat.SetColor("_Color", color);
             }
 
-            mat.SetOverrideTag("RenderType", "Transparent");
-            mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-            mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-            mat.SetInt("_ZWrite", 0);
-            mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+            if (mat.HasProperty("_Selected"))
+            {
+                mat.SetFloat("_Selected", 0f);
+            }
+
+            mat.color = color;
+            // Match Final Demo Palace keep-list (5100) so dismiss shells clear Overlay sky.
+            mat.renderQueue = 5100;
             return mat;
         }
 

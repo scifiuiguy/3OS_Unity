@@ -476,9 +476,13 @@ namespace ThreeOS
             }
 
             var sphereMr = sphere.GetComponent<MeshRenderer>();
-            sphereMr.sharedMaterial = CreateTranslucentUnlitMaterial(new Color(0.65f, 0.65f, 0.7f, 0.35f));
-            // Draw shell first so opaque X bars remain readable through it.
-            sphereMr.sortingOrder = -1;
+            // Translucent shell under chrome (queue 5100 / sort 0). X bars draw later.
+            sphereMr.sharedMaterial = CreateTranslucentUnlitMaterial(new Color(0.72f, 0.72f, 0.78f, 0.28f));
+            sphereMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            sphereMr.receiveShadows = false;
+            sphereMr.allowOcclusionWhenDynamic = false;
+            sphereMr.sortingOrder = 0;
+            sphereMr.enabled = true;
 
             CreateXBar(visual.transform, 45f);
             CreateXBar(visual.transform, -45f);
@@ -506,9 +510,13 @@ namespace ThreeOS
             }
 
             var sphereMr = sphere.GetComponent<MeshRenderer>();
-            // High-visibility cyan shell so cut is obvious under the gray X.
-            sphereMr.sharedMaterial = CreateTranslucentUnlitMaterial(new Color(0.15f, 0.85f, 1f, 0.85f));
-            sphereMr.sortingOrder = -1;
+            // Translucent cyan shell under scissors chrome (queue 5100 / sort 0).
+            sphereMr.sharedMaterial = CreateTranslucentUnlitMaterial(new Color(0.15f, 0.85f, 1f, 0.32f));
+            sphereMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            sphereMr.receiveShadows = false;
+            sphereMr.allowOcclusionWhenDynamic = false;
+            sphereMr.sortingOrder = 0;
+            sphereMr.enabled = true;
 
             try
             {
@@ -542,8 +550,15 @@ namespace ThreeOS
                             glyphMat.SetColor("_BaseColor", c);
                         }
 
+                        // After shell (5100) so blades stay fully readable.
+                        glyphMat.renderQueue = 5120;
                         mr.sharedMaterial = glyphMat;
                     }
+
+                    mr.sortingOrder = 30;
+                    mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    mr.receiveShadows = false;
+                    mr.allowOcclusionWhenDynamic = false;
                 }
             }
             catch (Exception ex)
@@ -621,6 +636,7 @@ namespace ThreeOS
 
             var mat = new Material(Shader.Find("Unlit/Color") ?? Shader.Find("Sprites/Default") ??
                                    Shader.Find("Universal Render Pipeline/Unlit"));
+            var barMr = bar.GetComponent<MeshRenderer>();
             if (mat != null)
             {
                 var c = new Color(0.12f, 0.12f, 0.14f, 1f);
@@ -634,8 +650,15 @@ namespace ThreeOS
                     mat.SetColor("_BaseColor", c);
                 }
 
-                bar.GetComponent<MeshRenderer>().sharedMaterial = mat;
+                // After shell (5100) so the X stays fully on top of the translucent sphere.
+                mat.renderQueue = 5120;
+                barMr.sharedMaterial = mat;
             }
+
+            barMr.sortingOrder = 30;
+            barMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            barMr.receiveShadows = false;
+            barMr.allowOcclusionWhenDynamic = false;
         }
 
     }

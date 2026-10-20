@@ -14,13 +14,14 @@ namespace ThreeOS
         private readonly Transform _deadzoneSphere;
         private readonly MeshRenderer _sphereRenderer;
         private Material _material;
+        private Material _headMaterial;
         private Material _ghostMaterial;
         private Material _sphereMaterial;
         private static Mesh _coneMesh;
 
         private ThreeOSArrowVisual(LineRenderer shaft, LineRenderer ghostLine, Transform head,
             MeshRenderer headRenderer, Transform deadzoneSphere, MeshRenderer sphereRenderer,
-            Material material, Material ghostMaterial, Material sphereMaterial)
+            Material material, Material ghostMaterial, Material sphereMaterial, Material headMaterial)
         {
             _shaft = shaft;
             _ghostLine = ghostLine;
@@ -31,6 +32,7 @@ namespace ThreeOS
             _material = material;
             _ghostMaterial = ghostMaterial;
             _sphereMaterial = sphereMaterial;
+            _headMaterial = headMaterial;
         }
 
         public static ThreeOSArrowVisual Create(string name, float shaftWidth)
@@ -48,12 +50,15 @@ namespace ThreeOS
             }
 
             var mat = new Material(Shader.Find("Sprites/Default"));
+            // Match Final Demo Palace keep-list (5100) so arrows clear Overlay sky.
+            mat.renderQueue = 5100;
             shaft.sharedMaterial = mat;
             shaft.widthMultiplier = shaftWidth;
             shaft.useWorldSpace = true;
             shaft.loop = false;
             shaft.positionCount = 0;
             shaft.numCapVertices = 4;
+            shaft.sortingOrder = 40;
             shaft.enabled = false;
 
             var ghostGo = EnsureChild(root.transform, "GhostStick");
@@ -64,13 +69,14 @@ namespace ThreeOS
             }
 
             var ghostMat = new Material(Shader.Find("Sprites/Default"));
+            ghostMat.renderQueue = 5100;
             ghost.sharedMaterial = ghostMat;
             ghost.widthMultiplier = 0.0025f;
             ghost.useWorldSpace = true;
             ghost.loop = false;
             ghost.positionCount = 0;
             ghost.numCapVertices = 2;
-            ghost.sortingOrder = 20;
+            ghost.sortingOrder = 40;
             ghost.enabled = false;
 
             var headGo = EnsureChild(root.transform, "Head");
@@ -87,7 +93,12 @@ namespace ThreeOS
                 mr = headGo.AddComponent<MeshRenderer>();
             }
 
-            mr.sharedMaterial = mat;
+            // Dedicated head mat so LineRenderer material instancing cannot bleach the cone.
+            var headMat = new Material(mat);
+            headMat.renderQueue = 5100;
+            mr.sharedMaterial = headMat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
             headGo.SetActive(false);
 
             var sphereGo = EnsureChild(root.transform, "DeadzoneSphere");
@@ -123,7 +134,7 @@ namespace ThreeOS
             sphereGo.SetActive(false);
 
             return new ThreeOSArrowVisual(shaft, ghost, headGo.transform, mr, sphereGo.transform, smr,
-                mat, ghostMat, sphereMat);
+                mat, ghostMat, sphereMat, headMat);
         }
 
         public void Set(Vector3 from, Vector3 to, Color color)
@@ -250,14 +261,22 @@ namespace ThreeOS
 
         private void ApplyColor(Color color)
         {
-            if (_material != null)
+            // Shaft uses LineRenderer vertex colors; cone MeshRenderer needs _Color/_BaseColor.
+            ApplyTransparentColor(_material, color);
+            ApplyTransparentColor(_headMaterial, color);
+            if (_headRenderer != null && _headMaterial != null)
             {
-                _material.color = color;
+                _headRenderer.sharedMaterial = _headMaterial;
             }
         }
 
         private static void ApplyTransparentColor(Material mat, Color c)
         {
+            if (mat == null)
+            {
+                return;
+            }
+
             mat.color = c;
             if (mat.HasProperty("_BaseColor"))
             {
@@ -294,7 +313,8 @@ namespace ThreeOS
             mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
             mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
             mat.SetInt("_ZWrite", 0);
-            mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+            // Match Final Demo Palace keep-list (5100) so deadzone sphere clears Overlay sky.
+            mat.renderQueue = 5100;
             return mat;
         }
 

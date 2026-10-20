@@ -141,34 +141,42 @@ namespace ThreeOS
 
                 if (Time.unscaledTime - _triggerDownTime >= holdSec)
                 {
-                    var selectedId = selForHold;
-                    // Hover glyph/ghost under the cursor wins over a prior selection so
-                    // direct-drag on B works while A is selected. Unselected + palm-down:
-                    // leave yellow voodoo (no Windows grab). No hit + selection: drag
-                    // selection (palm ignored) — velocity / possess / ghost-scale as before.
-                    ulong dragId = 0;
-                    if (TryHitTestYawAligned(aimUnity.position, rayDir, out var hitId) &&
-                        TryFindItem(hitId, out var hitItem) &&
-                        (hitItem.kind == 0 || hitItem.kind == 1) &&
-                        (selectedId != 0 || SelectHandPalmMode() != PalmMode.Down))
+                    // Palm-down: yellow voodoo always wins — never start selection /
+                    // possess / ghost-drag (that would mark the hand busy and cancel
+                    // VoodooSnap in the kernel). Sideways / Up keep telekinesis paths.
+                    if (SelectHandPalmMode() == PalmMode.Down)
                     {
-                        if (hitId != selectedId && _bridge.SetSelection(hitId))
+                        // Leave drag inactive so release stays a no-op select tap.
+                    }
+                    else
+                    {
+                        var selectedId = selForHold;
+                        // Hover glyph/ghost under the cursor wins over a prior selection so
+                        // direct-drag on B works while A is selected. No hit + selection:
+                        // drag selection — velocity / possess / ghost-scale as before.
+                        ulong dragId = 0;
+                        if (TryHitTestYawAligned(aimUnity.position, rayDir, out var hitId) &&
+                            TryFindItem(hitId, out var hitItem) &&
+                            (hitItem.kind == 0 || hitItem.kind == 1))
                         {
-                            _selectionLabel = hitItem.Name;
-                            _status = $"Sel:{_selectionLabel}";
+                            if (hitId != selectedId && _bridge.SetSelection(hitId))
+                            {
+                                _selectionLabel = hitItem.Name;
+                                _status = $"Sel:{_selectionLabel}";
+                            }
+
+                            dragId = hitId;
+                        }
+                        else if (selectedId != 0)
+                        {
+                            dragId = selectedId;
                         }
 
-                        dragId = hitId;
-                    }
-                    else if (selectedId != 0)
-                    {
-                        dragId = selectedId;
-                    }
-
-                    if (dragId != 0)
-                    {
-                        _triggerDragActive = true;
-                        TryBeginSelectedDrag(dragId, aimUnity.position);
+                        if (dragId != 0)
+                        {
+                            _triggerDragActive = true;
+                            TryBeginSelectedDrag(dragId, aimUnity.position);
+                        }
                     }
                 }
             }
