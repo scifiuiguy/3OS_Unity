@@ -222,6 +222,8 @@ namespace ThreeOS
         TernaryHeld = 1 << 5,
         VoodooFree = 1 << 6,
         MindPalaceMenu = 1 << 7,
+        ModeToggleArmed = 1 << 8,
+        ModeTogglePulse = 1 << 9,
     }
 
     public enum MultiChoiceMode : uint

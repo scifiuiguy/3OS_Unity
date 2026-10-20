@@ -75,6 +75,13 @@ namespace ThreeOS
         public string DemoRoot => _demoRoot;
         public string SelectionLabel => _selectionLabel;
 
+        // Visual reconcile is dirty-flagged — not a 72 Hz full workspace scan.
+        bool _viewsDirty = true;
+        bool _ghostsDirty = true;
+        bool _selectionMatsDirty = true;
+        ulong _lastSelectionId = ulong.MaxValue;
+        float _nextSafetyReconcileAt;
+
         // Collaborator access
         internal ThreeOSBridge Bridge => _bridge;
         internal ThreeOSInputRouter Input => _input;
@@ -120,6 +127,17 @@ namespace ThreeOS
 
         internal Coroutine StartCoroutinePublic(IEnumerator routine) => StartCoroutine(routine);
         internal static string CombineRootRelPublic(string root, string rel) => CombineRootRel(root, rel);
+
+        internal void MarkViewsDirty() => _viewsDirty = true;
+        internal void MarkGhostsDirty() => _ghostsDirty = true;
+        internal void MarkSelectionMatsDirty() => _selectionMatsDirty = true;
+
+        internal void MarkStorageVisualsDirty()
+        {
+            _viewsDirty = true;
+            _ghostsDirty = true;
+            _selectionMatsDirty = true;
+        }
 
         private void Awake()
         {
@@ -305,16 +323,58 @@ namespace ThreeOS
             if (_topology != null && _topology.LatticeActive)
                 return;
 
-            _glyphs.SyncViewsFromKernel();
-            _glyphs.SyncGhostViewsFromKernel();
-            _dismiss.UpdateExpandedDismissAffordances();
-            _dismiss.UpdatePortalDismissAffordances();
-            _multiChoice?.Tick();
+            // Input must stay per-frame (edges / hold / drag).
             _interaction.HandleTriggerSelectAndDrag();
-            _glyphs.SyncSelectionMaterials();
+            _multiChoice?.Tick();
             _interaction.UpdateInsertArrow();
             _fs.HandleStorageEvents();
-            _glyphs.BillboardLabels();
+
+            if (_bridge.TryGetSelection(out var selectedId) && selectedId != _lastSelectionId)
+            {
+                _lastSelectionId = selectedId;
+                _selectionMatsDirty = true;
+            }
+
+            // Ghosts track portal/near-field motion; far views only during box/insert anims.
+            var snapPending = _bridge.TryGetSnap(out var snap) && snap.pending != 0;
+            if (GhostDragging || snapPending || _bridge.VoodooPortalCount > 0)
+                _ghostsDirty = true;
+            if (InsertAnimBusy || BoxAnimBusy || _animLockedIds.Count > 0)
+                _viewsDirty = true;
+
+            if (_viewsDirty)
+            {
+                _glyphs.SyncViewsFromKernel();
+                _viewsDirty = false;
+            }
+
+            if (_ghostsDirty)
+            {
+                _glyphs.SyncGhostViewsFromKernel();
+                _ghostsDirty = false;
+            }
+
+            // Hover chrome only while something can be hovered.
+            if (_expanded.ExpandedBoxes.Count > 0)
+                _dismiss.UpdateExpandedDismissAffordances();
+            if (_bridge.VoodooPortalCount > 0)
+                _dismiss.UpdatePortalDismissAffordances();
+
+            if (_selectionMatsDirty)
+            {
+                _glyphs.SyncSelectionMaterials();
+                _selectionMatsDirty = false;
+            }
+
+            var billboardSel = _lastSelectionId == ulong.MaxValue ? 0UL : _lastSelectionId;
+            _glyphs.BillboardSelectedAndVoodooLabels(billboardSel);
+
+            // Catch missed dirty marks (portal open, kernel layout) without 72 Hz scans.
+            if (Time.unscaledTime >= _nextSafetyReconcileAt)
+            {
+                _nextSafetyReconcileAt = Time.unscaledTime + 0.35f;
+                MarkStorageVisualsDirty();
+            }
         }
 
         #region Update Helpers
@@ -348,7 +408,8 @@ namespace ThreeOS
             {
                 foreach (var fileName in new[]
                          { "box.3glyph", "box_open.3glyph", "gltf_mark.3glyph", "scissors.3glyph",
-                           "heart.3glyph", "heart_filled.3glyph", "arrow.3glyph", "mic.3glyph" })
+                           "heart.3glyph", "heart_filled.3glyph", "arrow.3glyph", "mic.3glyph",
+                           "mr.3glyph", "vr.3glyph" })
                 {
                     var url = Path.Combine(Application.streamingAssetsPath, "3OS", "glyphs", fileName);
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -591,6 +652,8 @@ namespace ThreeOS
                     continue;
                 _glyphs.Views[item.entityId] = _glyphs.CreateView(item);
             }
+
+            MarkStorageVisualsDirty();
         }
 
         private void OnDestroy()

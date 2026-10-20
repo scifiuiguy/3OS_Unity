@@ -52,7 +52,11 @@ namespace ThreeOS
         private void Destroy(UnityEngine.Object o) { if (o != null) UnityEngine.Object.Destroy(o); }
         private List<ulong> CollectChildIds(ulong boxId) => _host.Expanded.CollectChildIds(boxId);
 
-        internal void BillboardLabels()
+        /// <summary>
+        /// Face labels toward the HMD only for the selected far-field glyph and all
+        /// voodoo ghost glyphs. Other workspace labels stay put (FPS).
+        /// </summary>
+        internal void BillboardSelectedAndVoodooLabels(ulong selectedId)
         {
             var cam = Camera.main;
             if (cam == null)
@@ -61,8 +65,13 @@ namespace ThreeOS
             }
 
             var camPos = cam.transform.position;
-            BillboardLabelSet(_views, camPos);
             BillboardLabelSet(_ghostViews, camPos);
+            if (selectedId != 0 && _views.TryGetValue(selectedId, out var view) &&
+                view.Root != null && view.Root.activeInHierarchy)
+            {
+                FaceCamera(view.NameLabel, camPos);
+                FaceCamera(view.SecondaryLabel, camPos);
+            }
         }
 
         internal static void BillboardLabelSet(Dictionary<ulong, ThreeOSGlyphView> set, Vector3 camPos)

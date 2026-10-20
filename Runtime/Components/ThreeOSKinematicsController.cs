@@ -21,6 +21,7 @@ namespace ThreeOS
         private ThreeOSBridge _bridge;
         private ThreeOSInputRouter _input;
         private ThreeOSTopologyController _topology;
+        private ThreeOSStorageController _storage;
         private ThreeOSMovable _target;
         private GameObject _floorVisual;
         private ThreeOSArrowVisual _stickArrow;
@@ -39,6 +40,8 @@ namespace ThreeOS
             _input = GetComponent<ThreeOSInputRouter>() ?? FindFirstObjectByType<ThreeOSInputRouter>();
             _topology = GetComponent<ThreeOSTopologyController>() ??
                         FindFirstObjectByType<ThreeOSTopologyController>();
+            _storage = GetComponent<ThreeOSStorageController>() ??
+                       FindFirstObjectByType<ThreeOSStorageController>();
             _target = FindFirstObjectByType<ThreeOSMovable>();
             EnsureFloorVisual();
             _stickArrow = ThreeOSArrowVisual.Create("3OS_StickVelocityRay", 0.008f);
@@ -71,8 +74,7 @@ namespace ThreeOS
             }
 
             // Phase 0.4 storage demo owns grip for workspace glyphs (stick ray still via LateUpdate).
-            var storage = FindFirstObjectByType<ThreeOSStorageController>();
-            if (storage != null && storage.DemoActive)
+            if (_storage != null && _storage.DemoActive)
             {
                 SyncPhase();
                 return;

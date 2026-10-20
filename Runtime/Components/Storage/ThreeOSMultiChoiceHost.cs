@@ -16,6 +16,9 @@ namespace ThreeOS
         private ulong _nextRootId = 9000;
         private readonly Dictionary<ulong, string> _rootPaths = new Dictionary<ulong, string>();
         private readonly Dictionary<ulong, string> _favoriteNames = new Dictionary<ulong, string>();
+        // Phase 0.7: push Documents demo roots once. Hot-plug / cloud / server drive
+        // discovery is Phase 2 — do not re-enumerate every Tick.
+        private bool _driveRootsPushed;
 
         // 2×2×2 @ 3″ voxels → ~6″ Multi-Choice cube.
         private const float VoxelM = 3f * 0.0254f;          // 0.0762
@@ -113,28 +116,20 @@ namespace ThreeOS
 
         internal void RefreshDriveRootsIfNeeded()
         {
+            if (_driveRootsPushed || Bridge == null || !Bridge.IsLoaded)
+                return;
+
             var docs = EnumerateDocumentsRoots();
-            if (docs.Count == 0)
-                return;
-
-            var changed = docs.Count != _roots.Count;
-            if (!changed)
-            {
-                for (var i = 0; i < docs.Count; i++)
-                {
-                    if (docs[i].name != _roots[i].name || docs[i].path != _roots[i].path)
-                    {
-                        changed = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!changed && _roots.Count > 0)
-                return;
-
             _roots.Clear();
             _rootPaths.Clear();
+            if (docs.Count == 0)
+            {
+                // Still mark pushed so we do not hammer empty Documents every frame.
+                _driveRootsPushed = true;
+                Bridge.SetDriveRoots(Array.Empty<InteropDriveRoot>());
+                return;
+            }
+
             var arr = new InteropDriveRoot[docs.Count];
             for (var i = 0; i < docs.Count; i++)
             {
@@ -145,6 +140,7 @@ namespace ThreeOS
             }
 
             Bridge.SetDriveRoots(arr);
+            _driveRootsPushed = true;
         }
 
         private static List<(string name, string path)> EnumerateDocumentsRoots()

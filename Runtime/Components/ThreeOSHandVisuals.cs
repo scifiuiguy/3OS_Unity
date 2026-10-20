@@ -54,13 +54,6 @@ namespace ThreeOS
             }
         }
 
-        private void LateUpdate()
-        {
-            // XRHandMeshController can restore the prefab material when tracking is acquired.
-            ApplyGhostMaterial(_leftRenderers);
-            ApplyGhostMaterial(_rightRenderers);
-        }
-
         private void OnDisable()
         {
             // Only destroy hands we spawned at runtime (not scene/prefab instances).

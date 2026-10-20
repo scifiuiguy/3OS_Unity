@@ -211,6 +211,7 @@ namespace ThreeOS
             {
                 _animLockedIds.Clear();
                 _boxAnimBusy = false;
+                _host.MarkStorageVisualsDirty();
             }
         }
 
@@ -232,6 +233,7 @@ namespace ThreeOS
             finally
             {
                 _animLockedIds.Clear();
+                _host.MarkStorageVisualsDirty();
                 _boxAnimBusy = false;
             }
         }

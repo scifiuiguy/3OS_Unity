@@ -450,6 +450,7 @@ namespace ThreeOS
             _possessing = false;
             _possessedId = 0;
             _triggerDragActive = false;
+            _host.MarkStorageVisualsDirty();
         }
 
         internal void ReleaseDragFromTrigger()
@@ -475,6 +476,7 @@ namespace ThreeOS
 
                 _ghostDragging = false;
                 _triggerDragActive = false;
+                _host.MarkStorageVisualsDirty();
                 return;
             }
 
