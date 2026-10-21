@@ -183,6 +183,7 @@ namespace ThreeOS
 
             if (!triggerDown && _triggerWasDown)
             {
+                var releasedHand = _selectHand;
                 if (_triggerGestureConsumed)
                 {
                     // X close (or other consumed press) — do not select/drag.
@@ -195,6 +196,12 @@ namespace ThreeOS
                          Time.unscaledTime - _triggerDownTime >= TriggerHoldDragSeconds)
                 {
                     // Held palm-down for voodoo — do not treat release as a select tap.
+                }
+                else if (_host.ShortPinchConsumeHandler != null &&
+                         releasedHand >= 0 &&
+                         _host.ShortPinchConsumeHandler(releasedHand))
+                {
+                    // Final Demo app-drop cancel (or other host consume) — no select.
                 }
                 else if (_triggerDownCursorValid &&
                          Vector3.Distance(SelectHandCursorOpenXr(), _triggerDownCursorXr) >
@@ -376,16 +383,32 @@ namespace ThreeOS
             }
 
             var now = Time.unscaledTime;
-            var isBox = TryFindItem(hitId, out var hitItem) && hitItem.kind == 1;
-            var doubleTap = isBox && hitId == _lastShortTapId &&
-                            (now - _lastShortTapTime) <= BoxDoubleTapSeconds &&
-                            !_expandedBoxes.ContainsKey(hitId);
+            var hasItem = TryFindItem(hitId, out var hitItem);
+            var isBox = hasItem && hitItem.kind == 1;
+            var doubleTapWindow = hitId == _lastShortTapId &&
+                                  (now - _lastShortTapTime) <= BoxDoubleTapSeconds;
 
-            if (doubleTap)
+            if (isBox && doubleTapWindow && !_expandedBoxes.ContainsKey(hitId))
             {
                 _lastShortTapId = 0;
                 _lastShortTapTime = -10f;
                 StartCoroutine(_host.Expanded.OpenBoxSequence(hitId));
+                return;
+            }
+
+            // Non-box file double-pinch (Final Demo 7.9 Blender spawn, etc.).
+            if (hasItem && !isBox && doubleTapWindow && hitItem.kind == 0)
+            {
+                var hand = _selectHand;
+                _lastShortTapId = 0;
+                _lastShortTapTime = -10f;
+                if (_bridge.SetSelection(hitId))
+                {
+                    _selectionLabel = hitItem.Name;
+                    _status = $"Sel:{_selectionLabel}";
+                }
+
+                _host.FileDoublePinchHandler?.Invoke(hitId, hitItem, hand);
                 return;
             }
 

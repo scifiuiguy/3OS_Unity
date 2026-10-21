@@ -342,6 +342,7 @@ Use this section for design notes, UX instincts, and “we’ll need this later�
 **Notes**
 
 - *(Selection-gated telekinesis promoted into Phase 0.4 Task U4.6.)*
+- [ ] **Glyph front-face convention:** `.3glyph` meshes with a clear front should face **local +Z** so hosts need no per-pack roll/yaw (mirrors core parking lot; `blender_mark` still corrected in `TryApplyPackMesh` until packs are re-authored).
 - [ ] **Glyph pack GUI (artist tool):** Simple GUI (Editor window and/or small desktop app) to generate `.3glyph` packs without CLI — pick GLB, fill association/tint fields, run inject. Mirrors core Post-1.0 tooling note; optional path for the deferred U4.2 Editor helper.
 - [ ] **Global field spacing + glyph scale:** When core exposes `get/set_field_spacing`, drive it from Unity inspector/settings together with `GlyphSizeM` (keep ~2.2× ratio or one master cell size) and optionally re-layout / rescale the visible field.
 - [ ] **Matrix padding / margins:** When core exposes padding/snap-margin knobs, surface them in Unity settings with field spacing (dense stacks should feel intentional, not sticky-snap-only).

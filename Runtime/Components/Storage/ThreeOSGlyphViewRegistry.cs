@@ -20,6 +20,7 @@ namespace ThreeOS
         private static readonly int GlowWidthProp = Shader.PropertyToID("_GlowWidth");
         private static readonly int GlowBoostProp = Shader.PropertyToID("_GlowBoost");
         private static readonly int GlowViewMixProp = Shader.PropertyToID("_GlowViewMix");
+        private static readonly Dictionary<string, Mesh> GlyphMeshCache = new Dictionary<string, Mesh>();
 
         internal ThreeOSGlyphViewRegistry(ThreeOSStorageController host)
         {
@@ -123,17 +124,19 @@ namespace ThreeOS
             movable.HalfExtent = ThreeOSStorageController.GlyphSizeM * 0.5f;
 
             // Unity's builtin cube mesh is 1 m; scale to authored glyph size (0.1 m).
+            // Pack meshes (e.g. blender_mark) replace the cube when a .3glyph/.bytes loads.
             var visual = GameObject.CreatePrimitive(PrimitiveType.Cube);
             visual.name = "Visual";
             visual.transform.SetParent(go.transform, false);
             visual.transform.localPosition = Vector3.zero;
             visual.transform.localRotation = Quaternion.identity;
             visual.transform.localScale = GlyphVisualScale(item.GlyphId);
+            TryApplyPackMesh(visual, item.GlyphId);
 
             var col = visual.GetComponent<BoxCollider>();
             if (col != null)
             {
-                // Collider is on the scaled child; keep it.
+                // Collider is on the scaled child; keep it for aim hits.
             }
 
             var mr = visual.GetComponent<MeshRenderer>();
@@ -217,11 +220,15 @@ namespace ThreeOS
                         if (view.NameLabel != null)
                         {
                             view.NameLabel.text = item.Name ?? string.Empty;
+                            EnsureLabelPill(view.NameLabel.transform, view.NameLabel,
+                                view.NameLabel.characterSize);
                         }
 
                         if (view.SecondaryLabel != null)
                         {
                             view.SecondaryLabel.text = item.SecondaryLabel ?? string.Empty;
+                            EnsureLabelPill(view.SecondaryLabel.transform, view.SecondaryLabel,
+                                view.SecondaryLabel.characterSize);
                         }
                     }
 
@@ -257,6 +264,7 @@ namespace ThreeOS
             visual.transform.localPosition = Vector3.zero;
             visual.transform.localRotation = Quaternion.identity;
             visual.transform.localScale = GlyphVisualScale(item.GlyphId);
+            TryApplyPackMesh(visual, item.GlyphId);
             var col = visual.GetComponent<BoxCollider>();
             if (col != null)
             {
@@ -325,13 +333,69 @@ namespace ThreeOS
                 return new Vector3(ThreeOSStorageController.GlyphSizeM * 1.05f, ThreeOSStorageController.GlyphSizeM * 0.85f, ThreeOSStorageController.GlyphSizeM * 1.05f);
             }
 
-            if (glyphId == "gltf_mark")
+            if (glyphId == "gltf_mark" || glyphId == "blender_mark")
             {
                 // Slightly smaller mark so Object ≠ Box silhouette.
                 return Vector3.one * (ThreeOSStorageController.GlyphSizeM * 0.85f);
             }
 
             return Vector3.one * ThreeOSStorageController.GlyphSizeM;
+        }
+
+        /// <summary>
+        /// Swap the cube MeshFilter for a pack GLB mesh when Resources has <c>3OS/glyphs/{id}</c>.
+        /// </summary>
+        internal static void TryApplyPackMesh(GameObject visual, string glyphId)
+        {
+            if (visual == null || string.IsNullOrEmpty(glyphId) ||
+                glyphId.StartsWith("procedural") || glyphId.StartsWith("box"))
+                return;
+
+            var mesh = LoadPackMesh(glyphId);
+            if (mesh == null)
+                return;
+
+            var mf = visual.GetComponent<MeshFilter>();
+            if (mf != null)
+                mf.sharedMesh = mesh;
+
+            // Fit mesh local AABB to box glyph size so blender_mark / marks match boxes.
+            var size = mesh.bounds.size;
+            var maxDim = Mathf.Max(size.x, Mathf.Max(size.y, size.z));
+            if (maxDim > 1e-8f)
+            {
+                var target = ThreeOSStorageController.GlyphSizeM;
+                visual.transform.localScale = Vector3.one * (target / maxDim);
+            }
+
+            // blender_mark was authored facing +Y (ceiling). Roll 90° then yaw 90° so the
+            // logo faces the player along the layout forward. Spec debt: glyph front = +Z
+            // (see IMPLEMENTATION_PLAN parking lot).
+            if (glyphId == "blender_mark")
+            {
+                visual.transform.localRotation =
+                    Quaternion.Euler(0f, 90f, 0f) * Quaternion.Euler(0f, 0f, 90f);
+            }
+        }
+
+        internal static Mesh LoadPackMesh(string glyphId)
+        {
+            if (GlyphMeshCache.TryGetValue(glyphId, out var cached) && cached != null)
+                return cached;
+
+            var ta = Resources.Load<TextAsset>("3OS/glyphs/" + glyphId);
+            if (ta == null || ta.bytes == null || ta.bytes.Length == 0)
+                return null;
+
+            if (!ThreeOSGlbMesh.TryLoadFirstMesh(ta.bytes, out var mesh, out var err) || mesh == null)
+            {
+                Debug.LogWarning($"[3OS] glyph mesh '{glyphId}': {err}");
+                return null;
+            }
+
+            mesh.name = "GlyphMesh_" + glyphId;
+            GlyphMeshCache[glyphId] = mesh;
+            return mesh;
         }
 
         internal void ResolveGlyphMaterial(InteropWorkspaceItem item, out Material mat, out bool ownsMaterial)
@@ -565,6 +629,12 @@ namespace ThreeOS
                 return new Color(0.10f, 0.72f, 0.78f, 0.55f);
             }
 
+            if (item.GlyphId == "blender_mark")
+            {
+                // Blender brand orange — readable on Palace sky.
+                return new Color(0.91f, 0.49f, 0.08f, 0.7f);
+            }
+
             return new Color(
                 Mathf.Approximately(item.tintR, 1f) && Mathf.Approximately(item.tintG, 1f)
                     ? 0.75f
@@ -658,7 +728,91 @@ namespace ThreeOS
                 }
             }
 
+            EnsureLabelPill(go.transform, tm, charSize);
             return tm;
+        }
+
+        /// <summary>
+        /// Soft gray capsule behind a TextMesh so Palace labels stay readable on the sky.
+        /// </summary>
+        internal static void EnsureLabelPill(Transform labelTf, TextMesh tm, float charSize)
+        {
+            if (labelTf == null || tm == null)
+                return;
+
+            const string pillName = "LabelPill";
+            var pillTf = labelTf.Find(pillName);
+            GameObject pillGo;
+            if (pillTf != null)
+            {
+                pillGo = pillTf.gameObject;
+            }
+            else
+            {
+                pillGo = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+                pillGo.name = pillName;
+                var col = pillGo.GetComponent<Collider>();
+                if (col != null)
+                    UnityEngine.Object.Destroy(col);
+                pillGo.transform.SetParent(labelTf, false);
+                // Capsule default axis = Y; roll so length runs along local X under the text.
+                pillGo.transform.localRotation = Quaternion.Euler(0f, 0f, 90f);
+                var sh = Shader.Find("ThreeOS/EqBar") ?? Shader.Find("Sprites/Default") ??
+                         Shader.Find("Unlit/Color");
+                var mat = new Material(sh);
+                var c = LabelPillColor;
+                mat.color = c;
+                if (mat.HasProperty("_Color"))
+                    mat.SetColor("_Color", c);
+                mat.renderQueue = 5090; // just under label font (5100)
+                var pMr = pillGo.GetComponent<MeshRenderer>();
+                pMr.sharedMaterial = mat;
+                pMr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                pMr.receiveShadows = false;
+            }
+
+            // Fit X to TextMesh glyph AABB + small L/R pad. Capsule mesh height is 2, so
+            // scale.y = desiredLength/2. Prior textW*1.2 ignored that and overshot.
+            MeasureLabelLocalSize(tm, charSize, out var textW, out var textH);
+            var pillHeight = Mathf.Max(textH * 1.1f, charSize * 6.5f);
+            // ~4% pad each side; /2 converts desired world length → capsule scale.y.
+            var pillLengthScale = textW * 1.08f * 0.5f;
+            // Capsule default long axis = Y; after Z-roll 90° that maps to label X.
+            pillGo.transform.localScale = new Vector3(pillHeight, pillLengthScale, pillHeight);
+            // +Z is away from camera (FaceCamera LookRotation); sit just behind the glyphs.
+            pillGo.transform.localPosition = new Vector3(0f, 0f, 0.012f);
+
+            var pillMr = pillGo.GetComponent<MeshRenderer>();
+            if (pillMr != null && pillMr.sharedMaterial != null)
+            {
+                var c = LabelPillColor;
+                var mat = pillMr.material;
+                mat.color = c;
+                if (mat.HasProperty("_Color"))
+                    mat.SetColor("_Color", c);
+            }
+        }
+
+        // Prior mid-gray ~0.58; 20% darker for contrast on Palace sky.
+        static readonly Color LabelPillColor = new Color(0.464f, 0.464f, 0.48f, 0.78f);
+
+        static void MeasureLabelLocalSize(TextMesh tm, float charSize, out float width, out float height)
+        {
+            width = charSize * (Mathf.Max(2, (tm.text ?? "?").Length) * 0.7f + 1.5f);
+            height = charSize * 9.5f;
+            if (tm == null)
+                return;
+            var r = tm.GetComponent<Renderer>();
+            if (r == null)
+                return;
+            // Force mesh rebuild for current string, then read local AABB (XY plane).
+            var text = tm.text;
+            tm.text = text ?? "?";
+            var lb = r.localBounds;
+            if (lb.size.x > 1e-5f)
+                width = lb.size.x;
+            if (lb.size.y > 1e-5f)
+                height = lb.size.y;
         }
         internal void SyncViewsFromKernel()
         {
@@ -716,11 +870,15 @@ namespace ThreeOS
                 if (view.NameLabel != null)
                 {
                     view.NameLabel.text = item.Name;
+                    EnsureLabelPill(view.NameLabel.transform, view.NameLabel,
+                        view.NameLabel.characterSize);
                 }
 
                 if (view.SecondaryLabel != null)
                 {
                     view.SecondaryLabel.text = item.SecondaryLabel;
+                    EnsureLabelPill(view.SecondaryLabel.transform, view.SecondaryLabel,
+                        view.SecondaryLabel.characterSize);
                 }
 
                 if (view.GlyphId != item.GlyphId)
@@ -730,6 +888,7 @@ namespace ThreeOS
                     if (view.Renderer != null)
                     {
                         view.Renderer.transform.localScale = GlyphVisualScale(item.GlyphId);
+                        TryApplyPackMesh(view.Renderer.gameObject, item.GlyphId);
                     }
                 }
             }
@@ -816,7 +975,7 @@ namespace ThreeOS
 
             var abiSelected = selectedId != 0 && entityId == selectedId;
             var blueHover = blueChildren != null && blueChildren.Contains(entityId);
-            var rimOn = abiSelected || blueHover;
+            var selectedOrHover = abiSelected || blueHover;
             var owned = view.OwnsMaterial ? view.Material : null;
             if (!_host.TryFindItem(entityId, out var item))
             {
@@ -826,14 +985,45 @@ namespace ThreeOS
                     fallback.a *= 0.5f;
                 }
 
-                ApplyGlyphSelection(view.Renderer, rimOn, fallback,
+                // Unknown item: keep Fresnel rim (cube-shaped fallback).
+                ApplyGlyphSelection(view.Renderer, selectedOrHover, fallback,
                     blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
                 return;
             }
 
-            ApplyGlyphSelection(view.Renderer, rimOn,
-                GhostDisplayColor(item, view.CutOpacityDuck),
+            var baseColor = GhostDisplayColor(item, view.CutOpacityDuck);
+            // Non-cube pack meshes (blender_mark, etc.): Fresnel rim looks wrong — brighten instead.
+            if (selectedOrHover && !UsesFresnelSelection(item.GlyphId))
+            {
+                ApplyGlyphSelection(view.Renderer, rimOn: false,
+                    BrightenForSelection(baseColor),
+                    blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
+                return;
+            }
+
+            ApplyGlyphSelection(view.Renderer, selectedOrHover, baseColor,
                 blueHover ? ExpandHoverGlowColor : (Color?)null, owned);
+        }
+
+        /// <summary>Cube / box glyphs keep Fresnel rim; authored pack meshes use brightness only.</summary>
+        internal static bool UsesFresnelSelection(string glyphId)
+        {
+            if (string.IsNullOrEmpty(glyphId))
+                return true;
+            if (glyphId.StartsWith("box") || glyphId.StartsWith("procedural"))
+                return true;
+            return false;
+        }
+
+        const float SelectionBrightnessBoost = 1.65f;
+
+        internal static Color BrightenForSelection(Color c)
+        {
+            return new Color(
+                Mathf.Min(1f, c.r * SelectionBrightnessBoost),
+                Mathf.Min(1f, c.g * SelectionBrightnessBoost),
+                Mathf.Min(1f, c.b * SelectionBrightnessBoost),
+                c.a);
         }
         /// <summary>
         /// Translucent shell for dismiss X / scissors. Prefer Resources

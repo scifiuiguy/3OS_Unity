@@ -261,8 +261,11 @@ namespace ThreeOS
             {
                 if (!FileLooksPresent(Path.Combine(fallback, "simple.glb")))
                     yield return SeedRootObject(fallback, "simple.glb");
+                if (!FileLooksPresent(Path.Combine(fallback, "DemonA.blend")))
+                    yield return SeedRootObject(fallback, "DemonA.blend");
                 persistentPopulated = DemoRootLooksPopulated(fallback) ||
-                                      FileLooksPresent(Path.Combine(fallback, "simple.glb"));
+                                      FileLooksPresent(Path.Combine(fallback, "simple.glb")) ||
+                                      FileLooksPresent(Path.Combine(fallback, "DemonA.blend"));
             }
 
 #if UNITY_ANDROID && !UNITY_EDITOR

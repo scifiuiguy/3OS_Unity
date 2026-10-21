@@ -16,8 +16,11 @@ namespace ThreeOS
     {
         public const string DemoFolderName = "3OS_Demo";
         public const string DemoFolderName2 = "3OS_Demo2";
+        public const string DemoFolderName3 = "3OS_Demo3";
         public const float MindPalaceFixtureRangeM = 10f * 0.3048f;
         public const float MindPalaceFixtureHeightM = 4.5f * 0.3048f;
+        /// <summary>Center Demo3 cluster — ahead of player, near floor.</summary>
+        public const float MindPalaceFixtureHeightFloorM = 1.0f * 0.3048f;
         public const float MindPalaceFixtureAzimuthDeg = 15f;
         public const float GlyphSizeM = 0.1f;
         public const float DismissXDiameterM = 0.06f;
@@ -61,6 +64,7 @@ namespace ThreeOS
         private string _status = "storage idle";
         private string _demoRoot = string.Empty;
         private string _demoRoot2 = string.Empty;
+        private string _demoRoot3 = string.Empty;
         private ThreeOSPose _layoutHeadPose;
         private bool _waitingForAllFilesAccess;
         private string _selectionLabel = "none";
@@ -74,8 +78,10 @@ namespace ThreeOS
         private bool _palaceSoftDismissed;
         private ulong _mpLeftId;
         private ulong _mpRightId;
+        private ulong _mpCenterId;
         private ThreeOSPose _mpLeftAnchor;
         private ThreeOSPose _mpRightAnchor;
+        private ThreeOSPose _mpCenterAnchor;
         private readonly List<ulong> _palaceEntityIds = new List<ulong>();
         private readonly Dictionary<ulong, ulong> _entityMindPalace = new Dictionary<ulong, ulong>();
         private ulong _mrPersistedSelectionId;
@@ -92,6 +98,8 @@ namespace ThreeOS
         private List<string> _precacheDirs1;
         private List<string> _precacheFiles2;
         private List<string> _precacheDirs2;
+        private List<string> _precacheFiles3;
+        private List<string> _precacheDirs3;
         private bool _palaceNamesPrecached;
 
         public int PossessDriveHand =>
@@ -172,6 +180,18 @@ namespace ThreeOS
         internal void MarkGhostsDirty() => _ghostsDirty = true;
         internal void MarkSelectionMatsDirty() => _selectionMatsDirty = true;
 
+        /// <summary>
+        /// Final Demo 7.9 — non-box file double-pinch.
+        /// Args: entityId, workspace item, select-hand index (0=L, 1=R).
+        /// </summary>
+        public System.Action<ulong, InteropWorkspaceItem, int> FileDoublePinchHandler;
+
+        /// <summary>
+        /// If set and returns true, a short primary release on that hand is consumed
+        /// (e.g. cancel an armed app-drop spinner) and must not select/deselect.
+        /// </summary>
+        public System.Func<int, bool> ShortPinchConsumeHandler;
+
         internal void MarkStorageVisualsDirty()
         {
             _viewsDirty = true;
@@ -220,12 +240,18 @@ namespace ThreeOS
             }
 
             yield return InstallPacks();
+            yield return null;
             yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
                 DemoFolderName, DemoSeedPolicy.RequireContent, null,
                 r => _demoRoot = r, s => _status = s);
+            yield return null;
             yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
                 DemoFolderName2, DemoSeedPolicy.SoftSeedMindPalaceMarker, _demoRoot,
                 r => _demoRoot2 = r, s => _status = s);
+            yield return null;
+            yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
+                DemoFolderName3, DemoSeedPolicy.SoftSeedMindPalaceMarker, _demoRoot,
+                r => _demoRoot3 = r, s => _status = s);
             if (string.IsNullOrEmpty(_demoRoot))
             {
                 Debug.LogError($"[3OS] demo load aborted: {_status}");
@@ -234,6 +260,7 @@ namespace ThreeOS
 
             HideNonGlyphMovables();
             yield return WaitForHeadPose();
+            yield return null;
 
             // Final Demo Act I (MR cold open): Stage is present → defer dual Mind Palace
             // centroids/glyphs until Act II / Task 7.7. DemoScene has no Stage → load as usual.
@@ -430,6 +457,8 @@ namespace ThreeOS
         private IEnumerator InstallPacks()
         {
             var installed = 0;
+            var installedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Spread glyph installs across frames — double-loading every pack was a cold-boot hitch.
             var packs = Resources.LoadAll<TextAsset>("3OS/glyphs");
             Debug.Log($"[3OS] Resources.LoadAll(3OS/glyphs) → {packs?.Length ?? 0} TextAsset(s)");
             if (packs != null)
@@ -441,56 +470,65 @@ namespace ThreeOS
                     if (_bridge.InstallGlyphPack(pack.bytes))
                     {
                         installed++;
+                        installedNames.Add(pack.name);
                         Debug.Log($"[3OS] installed glyph pack resource {pack.name} ({pack.bytes.Length} bytes)");
                     }
                     else
                         Debug.LogWarning($"[3OS] failed pack {pack.name}: {_bridge.LastError}");
+                    yield return null;
                 }
             }
 
-            if (installed < 3)
+            // StreamingAssets fills gaps only (e.g. blender_mark if Resources missed it).
+            foreach (var fileName in new[]
+                     { "box.3glyph", "box_open.3glyph", "gltf_mark.3glyph", "blender_mark.3glyph",
+                       "scissors.3glyph", "heart.3glyph", "heart_filled.3glyph", "arrow.3glyph",
+                       "mic.3glyph", "mr.3glyph", "vr.3glyph" })
             {
-                foreach (var fileName in new[]
-                         { "box.3glyph", "box_open.3glyph", "gltf_mark.3glyph", "scissors.3glyph",
-                           "heart.3glyph", "heart_filled.3glyph", "arrow.3glyph", "mic.3glyph",
-                           "mr.3glyph", "vr.3glyph" })
+                var stem = Path.GetFileNameWithoutExtension(fileName);
+                if (installedNames.Contains(stem))
                 {
-                    var url = Path.Combine(Application.streamingAssetsPath, "3OS", "glyphs", fileName);
-#if UNITY_ANDROID && !UNITY_EDITOR
-                    using (var req = UnityWebRequest.Get(url))
-                    {
-                        yield return req.SendWebRequest();
-                        if (req.result != UnityWebRequest.Result.Success ||
-                            req.downloadHandler?.data == null ||
-                            req.downloadHandler.data.Length == 0)
-                        {
-                            Debug.LogWarning($"[3OS] StreamingAssets pack miss {fileName}: {req.error}");
-                            continue;
-                        }
-                        if (_bridge.InstallGlyphPack(req.downloadHandler.data))
-                        {
-                            installed++;
-                            Debug.Log(
-                                $"[3OS] installed StreamingAssets pack {fileName} ({req.downloadHandler.data.Length} bytes)");
-                        }
-                        else
-                            Debug.LogWarning($"[3OS] failed StreamingAssets pack {fileName}: {_bridge.LastError}");
-                    }
-#else
-                    if (File.Exists(url))
-                    {
-                        var bytes = File.ReadAllBytes(url);
-                        if (_bridge.InstallGlyphPack(bytes))
-                        {
-                            installed++;
-                            Debug.Log($"[3OS] installed StreamingAssets pack {fileName} ({bytes.Length} bytes)");
-                        }
-                        else
-                            Debug.LogWarning($"[3OS] failed StreamingAssets pack {fileName}: {_bridge.LastError}");
-                    }
                     yield return null;
-#endif
+                    continue;
                 }
+
+                var url = Path.Combine(Application.streamingAssetsPath, "3OS", "glyphs", fileName);
+#if UNITY_ANDROID && !UNITY_EDITOR
+                using (var req = UnityWebRequest.Get(url))
+                {
+                    yield return req.SendWebRequest();
+                    if (req.result != UnityWebRequest.Result.Success ||
+                        req.downloadHandler?.data == null ||
+                        req.downloadHandler.data.Length == 0)
+                    {
+                        Debug.LogWarning($"[3OS] StreamingAssets pack miss {fileName}: {req.error}");
+                        continue;
+                    }
+                    if (_bridge.InstallGlyphPack(req.downloadHandler.data))
+                    {
+                        installed++;
+                        installedNames.Add(stem);
+                        Debug.Log(
+                            $"[3OS] installed StreamingAssets pack {fileName} ({req.downloadHandler.data.Length} bytes)");
+                    }
+                    else
+                        Debug.LogWarning($"[3OS] failed StreamingAssets pack {fileName}: {_bridge.LastError}");
+                }
+#else
+                if (File.Exists(url))
+                {
+                    var bytes = File.ReadAllBytes(url);
+                    if (_bridge.InstallGlyphPack(bytes))
+                    {
+                        installed++;
+                        installedNames.Add(stem);
+                        Debug.Log($"[3OS] installed StreamingAssets pack {fileName} ({bytes.Length} bytes)");
+                    }
+                    else
+                        Debug.LogWarning($"[3OS] failed StreamingAssets pack {fileName}: {_bridge.LastError}");
+                }
+                yield return null;
+#endif
             }
 
             if (installed < 3)
@@ -508,29 +546,43 @@ namespace ThreeOS
             _mrPersistedOriginalMpId = 0;
             var leftAnchor = MindPalaceFixturePose(origin, -MindPalaceFixtureAzimuthDeg);
             var rightAnchor = MindPalaceFixturePose(origin, MindPalaceFixtureAzimuthDeg);
+            var centerAnchor = MindPalaceFixturePose(origin, 0f, MindPalaceFixtureHeightFloorM);
             if (!_bridge.TryRegisterMindPalace(DemoFolderName, leftAnchor, out var mpL) ||
                 !_bridge.TryRegisterMindPalace(DemoFolderName2, rightAnchor, out var mpR))
             {
                 _status = $"mind palace register failed: {_bridge.LastError}";
                 return false;
             }
+
             _mpLeftId = mpL;
             _mpRightId = mpR;
             _mpLeftAnchor = leftAnchor;
             _mpRightAnchor = rightAnchor;
+            _mpCenterId = 0;
+            _mpCenterAnchor = centerAnchor;
+            if (_bridge.TryRegisterMindPalace(DemoFolderName3, centerAnchor, out var mpC))
+                _mpCenterId = mpC;
+            else
+                Debug.LogWarning($"[3OS] Demo3 MindPalace register weak: {_bridge.LastError}");
+
             if (!LoadDemoDirectory(_demoRoot, mpL, clearFirst: false, cheapChildCounts: true))
                 return false;
             if (string.IsNullOrEmpty(_demoRoot2) ||
                 !LoadDemoDirectory(_demoRoot2, mpR, clearFirst: false, cheapChildCounts: true))
                 Debug.LogWarning($"[3OS] Demo2 load weak: {_status} — continuing with MindPalace L only");
+            if (_mpCenterId != 0 && !string.IsNullOrEmpty(_demoRoot3) &&
+                !LoadDemoDirectory(_demoRoot3, _mpCenterId, clearFirst: false, cheapChildCounts: true))
+                Debug.LogWarning($"[3OS] Demo3 load weak: {_status}");
             CapturePalaceEntityIds();
             if (!_bridge.LayoutMindPalace(mpL, leftAnchor))
                 Debug.LogWarning($"[3OS] layout MindPalace L: {_bridge.LastError}");
             if (!_bridge.LayoutMindPalace(mpR, rightAnchor))
                 Debug.LogWarning($"[3OS] layout MindPalace R: {_bridge.LastError}");
+            if (_mpCenterId != 0 && !_bridge.LayoutMindPalace(_mpCenterId, centerAnchor))
+                Debug.LogWarning($"[3OS] layout MindPalace C: {_bridge.LastError}");
             _palaceFixtureLoaded = true;
             _palaceSoftDismissed = false;
-            Debug.Log($"[3OS] dual-mind-palace fixture L={mpL} R={mpR}");
+            Debug.Log($"[3OS] mind-palace fixture L={mpL} R={mpR} C={_mpCenterId}");
             return true;
         }
 
@@ -555,7 +607,8 @@ namespace ThreeOS
             return InteropStructs.ToOpenXrPose(unityPose);
         }
 
-        private static ThreeOSPose MindPalaceFixturePose(ThreeOSPose origin, float azimuthDeg)
+        private static ThreeOSPose MindPalaceFixturePose(ThreeOSPose origin, float azimuthDeg,
+            float heightM = -1f)
         {
             var q = new Quaternion(origin.orientation.x, origin.orientation.y, origin.orientation.z,
                 origin.orientation.w);
@@ -567,9 +620,10 @@ namespace ThreeOS
             var right = Vector3.Cross(Vector3.up, fwd).normalized;
             var rad = azimuthDeg * Mathf.Deg2Rad;
             var dir = (Mathf.Cos(rad) * fwd + Mathf.Sin(rad) * right).normalized;
+            var h = heightM >= 0f ? heightM : MindPalaceFixtureHeightM;
             var pos = new Vector3(
                 origin.position.x + dir.x * MindPalaceFixtureRangeM,
-                origin.position.y + MindPalaceFixtureHeightM,
+                origin.position.y + h,
                 origin.position.z + dir.z * MindPalaceFixtureRangeM);
             var face = -dir;
             var yaw = Mathf.Atan2(face.x, -face.z);
@@ -615,15 +669,13 @@ namespace ThreeOS
                 yield break;
             }
 
-            // Let wipe settle / compositor breathe before FS work.
-            yield return null;
-            yield return null;
-
-            // Prefer Act I precache; wait briefly if still warming.
-            var waitPc = Time.realtimeSinceStartup + 6f;
-            while (!_palaceNamesPrecached && !string.IsNullOrEmpty(_demoRoot) &&
-                   Time.realtimeSinceStartup < waitPc)
-                yield return null;
+            // Prefer Act I precache; wait briefly if still warming (names only — not the hitch).
+            if (!_palaceNamesPrecached && !string.IsNullOrEmpty(_demoRoot))
+            {
+                var waitPc = Time.realtimeSinceStartup + 2f;
+                while (!_palaceNamesPrecached && Time.realtimeSinceStartup < waitPc)
+                    yield return null;
+            }
 
             if (_palaceFixtureLoaded && _palaceSoftDismissed)
             {
@@ -646,8 +698,10 @@ namespace ThreeOS
             }
 
             // Hide before first render frame — SyncViews must not flash full-size glyphs.
+            // Precache → many views/frame so prepare finishes during the sky wipe.
             _palacePendingScaleIn = true;
-            yield return RebuildViewsSpreadRoutine(viewsPerFrame: 1);
+            var viewsPer = _palaceNamesPrecached ? 6 : 2;
+            yield return RebuildViewsSpreadRoutine(viewsPerFrame: viewsPer);
             HidePalaceGlyphsPendingScaleIn(_mrPersistedSelectionId);
         }
 
@@ -679,6 +733,7 @@ namespace ThreeOS
 
             var leftAnchor = MindPalaceFixturePose(origin, -MindPalaceFixtureAzimuthDeg);
             var rightAnchor = MindPalaceFixturePose(origin, MindPalaceFixtureAzimuthDeg);
+            var centerAnchor = MindPalaceFixturePose(origin, 0f, MindPalaceFixtureHeightFloorM);
             if (!_bridge.TryRegisterMindPalace(DemoFolderName, leftAnchor, out var mpL) ||
                 !_bridge.TryRegisterMindPalace(DemoFolderName2, rightAnchor, out var mpR))
             {
@@ -690,13 +745,19 @@ namespace ThreeOS
             _mpRightId = mpR;
             _mpLeftAnchor = leftAnchor;
             _mpRightAnchor = rightAnchor;
+            _mpCenterId = 0;
+            _mpCenterAnchor = centerAnchor;
+            if (_bridge.TryRegisterMindPalace(DemoFolderName3, centerAnchor, out var mpC))
+                _mpCenterId = mpC;
+            else
+                Debug.LogWarning($"[3OS] Demo3 MindPalace register weak: {_bridge.LastError}");
             yield return null;
 
-            // Chunk FS + StorageAdd across frames (1 item/frame) — sync LoadDemoDirectory
-            // still freezes the HMD ~2s on Quest Documents roots.
+            // Gentle adds — Act I already warmed names; wipe gives more time than before.
+            var addsPer = _palaceNamesPrecached ? 4 : 2;
             var ok1 = false;
             yield return LoadDemoDirectoryRoutine(_demoRoot, mpL, clearFirst: false,
-                addsPerFrame: 1, skipChildCounts: true, ok => ok1 = ok);
+                addsPerFrame: addsPer, skipChildCounts: true, ok => ok1 = ok);
             if (!ok1)
                 yield break;
             Debug.Log("[3OS] Palace Demo1 chunk-loaded");
@@ -706,9 +767,19 @@ namespace ThreeOS
             if (!string.IsNullOrEmpty(_demoRoot2))
             {
                 yield return LoadDemoDirectoryRoutine(_demoRoot2, mpR, clearFirst: false,
-                    addsPerFrame: 1, skipChildCounts: true, ok => ok2 = ok);
+                    addsPerFrame: addsPer, skipChildCounts: true, ok => ok2 = ok);
                 if (!ok2)
                     Debug.LogWarning($"[3OS] Demo2 load weak: {_status} — continuing with MindPalace L only");
+            }
+
+            yield return null;
+            if (_mpCenterId != 0 && !string.IsNullOrEmpty(_demoRoot3))
+            {
+                var ok3 = true;
+                yield return LoadDemoDirectoryRoutine(_demoRoot3, _mpCenterId, clearFirst: false,
+                    addsPerFrame: addsPer, skipChildCounts: true, ok => ok3 = ok);
+                if (!ok3)
+                    Debug.LogWarning($"[3OS] Demo3 load weak: {_status}");
             }
 
             CapturePalaceEntityIds();
@@ -720,26 +791,34 @@ namespace ThreeOS
             if (!_bridge.LayoutMindPalace(mpR, rightAnchor))
                 Debug.LogWarning($"[3OS] layout MindPalace R: {_bridge.LastError}");
             yield return null;
+            if (_mpCenterId != 0 && !_bridge.LayoutMindPalace(_mpCenterId, centerAnchor))
+                Debug.LogWarning($"[3OS] layout MindPalace C: {_bridge.LastError}");
+            yield return null;
             _palaceFixtureLoaded = true;
             _palaceSoftDismissed = false;
-            Debug.Log($"[3OS] dual-mind-palace fixture L={mpL} R={mpR} entities={_palaceEntityIds.Count}");
+            Debug.Log(
+                $"[3OS] mind-palace fixture L={mpL} R={mpR} C={_mpCenterId} entities={_palaceEntityIds.Count}");
             yield return null;
         }
 
         IEnumerator PrecachePalaceDirectoryNamesRoutine()
         {
-            // Spread listings across many frames while user is still in MR Act I.
-            yield return new WaitForSecondsRealtime(0.5f);
+            // Plenty of Act I time — delay and spread so cold open stays smooth.
+            yield return new WaitForSecondsRealtime(2.5f);
             yield return PrecacheOneRootRoutine(_demoRoot, files => _precacheFiles1 = files,
                 dirs => _precacheDirs1 = dirs);
-            yield return null;
+            yield return new WaitForSecondsRealtime(0.35f);
             yield return PrecacheOneRootRoutine(_demoRoot2, files => _precacheFiles2 = files,
                 dirs => _precacheDirs2 = dirs);
+            yield return new WaitForSecondsRealtime(0.35f);
+            yield return PrecacheOneRootRoutine(_demoRoot3, files => _precacheFiles3 = files,
+                dirs => _precacheDirs3 = dirs);
             _palaceNamesPrecached = true;
             Debug.Log(
                 $"[3OS] Palace names precached " +
                 $"d1=f{_precacheFiles1?.Count ?? 0}/d{_precacheDirs1?.Count ?? 0} " +
-                $"d2=f{_precacheFiles2?.Count ?? 0}/d{_precacheDirs2?.Count ?? 0}");
+                $"d2=f{_precacheFiles2?.Count ?? 0}/d{_precacheDirs2?.Count ?? 0} " +
+                $"d3=f{_precacheFiles3?.Count ?? 0}/d{_precacheDirs3?.Count ?? 0}");
         }
 
         IEnumerator PrecacheOneRootRoutine(string root, Action<List<string>> setFiles,
@@ -777,7 +856,7 @@ namespace ThreeOS
             }
 
             yield return null;
-            foreach (var probe in new[] { "simple.glb", "simple.gltf", "marker.txt" })
+            foreach (var probe in new[] { "simple.glb", "simple.gltf", "DemonA.blend", "marker.txt" })
             {
                 if (ThreeOSAndroidStorage.TryProbeFileName(root, probe) &&
                     !files.Exists(n => string.Equals(n, probe, StringComparison.OrdinalIgnoreCase)))
@@ -815,7 +894,8 @@ namespace ThreeOS
             List<string> dirNames;
             var usePrecache = _palaceNamesPrecached &&
                               ((root == _demoRoot && _precacheDirs1 != null) ||
-                               (root == _demoRoot2 && _precacheDirs2 != null));
+                               (root == _demoRoot2 && _precacheDirs2 != null) ||
+                               (root == _demoRoot3 && _precacheDirs3 != null));
             if (usePrecache && root == _demoRoot)
             {
                 fileNames = new List<string>(_precacheFiles1 ?? new List<string>());
@@ -827,6 +907,12 @@ namespace ThreeOS
                 fileNames = new List<string>(_precacheFiles2 ?? new List<string>());
                 dirNames = new List<string>(_precacheDirs2 ?? new List<string>());
                 Debug.Log($"[3OS] using precache for Demo2 ({fileNames.Count}f/{dirNames.Count}d)");
+            }
+            else if (usePrecache && root == _demoRoot3)
+            {
+                fileNames = new List<string>(_precacheFiles3 ?? new List<string>());
+                dirNames = new List<string>(_precacheDirs3 ?? new List<string>());
+                Debug.Log($"[3OS] using precache for Demo3 ({fileNames.Count}f/{dirNames.Count}d)");
             }
             else
             {
@@ -854,7 +940,7 @@ namespace ThreeOS
                 }
 
                 yield return null;
-                foreach (var probe in new[] { "simple.glb", "simple.gltf", "marker.txt" })
+                foreach (var probe in new[] { "simple.glb", "simple.gltf", "DemonA.blend", "marker.txt" })
                 {
                     if (ThreeOSAndroidStorage.TryProbeFileName(root, probe) &&
                         !fileNames.Exists(n => string.Equals(n, probe, StringComparison.OrdinalIgnoreCase)))
@@ -985,6 +1071,7 @@ namespace ThreeOS
             {
                 _mpLeftAnchor = MindPalaceFixturePose(origin, -MindPalaceFixtureAzimuthDeg);
                 _mpRightAnchor = MindPalaceFixturePose(origin, MindPalaceFixtureAzimuthDeg);
+                _mpCenterAnchor = MindPalaceFixturePose(origin, 0f, MindPalaceFixtureHeightFloorM);
             }
 
             for (var i = 0; i < _palaceEntityIds.Count; i++)
@@ -1001,6 +1088,8 @@ namespace ThreeOS
                 _bridge.LayoutMindPalace(_mpLeftId, _mpLeftAnchor);
             if (_mpRightId != 0)
                 _bridge.LayoutMindPalace(_mpRightId, _mpRightAnchor);
+            if (_mpCenterId != 0)
+                _bridge.LayoutMindPalace(_mpCenterId, _mpCenterAnchor);
 
             // Re-link persisted selection to original Palace centroid; keep world pose (anim lock).
             if (_mrPersistedSelectionId != 0)
@@ -1295,7 +1384,7 @@ namespace ThreeOS
                     fileNames.Add(name);
                 foreach (var name in ThreeOSAndroidStorage.ListDirectoryNames(candidateRoot))
                     dirNames.Add(name);
-                foreach (var probe in new[] { "simple.glb", "simple.gltf", "marker.txt" })
+                foreach (var probe in new[] { "simple.glb", "simple.gltf", "DemonA.blend", "marker.txt" })
                 {
                     if (ThreeOSAndroidStorage.TryProbeFileName(candidateRoot, probe))
                         fileNames.Add(probe);
