@@ -224,6 +224,8 @@ namespace ThreeOS
         MindPalaceMenu = 1 << 7,
         ModeToggleArmed = 1 << 8,
         ModeTogglePulse = 1 << 9,
+        VoodooDismissPulse = 1 << 10,
+        VoodooDismissAllPulse = 1 << 11,
     }
 
     public enum MultiChoiceMode : uint

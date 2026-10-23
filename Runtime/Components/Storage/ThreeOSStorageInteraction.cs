@@ -21,6 +21,11 @@ namespace ThreeOS
         private float _triggerDownTime { get => _host.TriggerDownTime; set => _host.TriggerDownTime = value; }
         private bool _triggerDragActive { get => _host.TriggerDragActive; set => _host.TriggerDragActive = value; }
         private bool _triggerGestureConsumed { get => _host.TriggerGestureConsumed; set => _host.TriggerGestureConsumed = value; }
+        private float _dismissKeepSelectionUntil
+        {
+            get => _host.DismissKeepSelectionUntil;
+            set => _host.DismissKeepSelectionUntil = value;
+        }
         private Vector3 _triggerDownCursorXr { get => _host.TriggerDownCursorXr; set => _host.TriggerDownCursorXr = value; }
         private bool _triggerDownCursorValid { get => _host.TriggerDownCursorValid; set => _host.TriggerDownCursorValid = value; }
         private int _selectHand { get => _host.SelectHandField; set => _host.SelectHandField = value; }
@@ -67,6 +72,10 @@ namespace ThreeOS
             var leftDown = frame.leftTrigger >= TriggerAxisThreshold;
             var rightDown = frame.rightTrigger >= TriggerAxisThreshold;
             var triggerDown = leftDown || rightDown;
+
+            // Arm keep-selection window as soon as core reports dismiss (same or prior tick).
+            if (_bridge.VoodooDismissGestureResult != 0)
+                _dismissKeepSelectionUntil = Time.unscaledTime + 0.55f;
 
             // Per-hand rising edge: X dismiss or scissors cut, independently per hand.
             var leftChrome = false;
@@ -197,6 +206,11 @@ namespace ThreeOS
                 {
                     // Held palm-down for voodoo — do not treat release as a select tap.
                 }
+                else if (ShouldSuppressSelectForVoodooDismiss())
+                {
+                    // Dismiss / Dismiss All must not clear selection — user often dismisses
+                    // voodoo chrome then carries the still-selected far object into MR.
+                }
                 else if (_host.ShortPinchConsumeHandler != null &&
                          releasedHand >= 0 &&
                          _host.ShortPinchConsumeHandler(releasedHand))
@@ -246,12 +260,43 @@ namespace ThreeOS
             return at != home ? 0.08f : 0.03f;
         }
 
+        /// <summary>
+        /// True when a Voodoo dismiss just ran (or palms-up secondary is active). Empty-air
+        /// deselect must not fire — portals may already be gone so homePortal reads as 0.
+        /// </summary>
+        bool ShouldSuppressSelectForVoodooDismiss()
+        {
+            if (Time.unscaledTime < _dismissKeepSelectionUntil)
+                return true;
+            if (_bridge.VoodooDismissGestureResult != 0)
+            {
+                _dismissKeepSelectionUntil = Time.unscaledTime + 0.55f;
+                return true;
+            }
+
+            if (_input != null)
+            {
+                var flags = (InteractionIntentFlags)_input.LastIntents.flags;
+                if ((flags & InteractionIntentFlags.VoodooDismissAllPulse) != 0 ||
+                    (flags & InteractionIntentFlags.VoodooDismissPulse) != 0)
+                {
+                    _dismissKeepSelectionUntil = Time.unscaledTime + 0.55f;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         internal void HandleShortTriggerTap(Vector3 rayOrigin, Vector3 rayDir)
         {
             if (_boxAnimBusy || _insertAnimBusy)
             {
                 return;
             }
+
+            if (ShouldSuppressSelectForVoodooDismiss())
+                return;
 
             _bridge.TryGetSelection(out var selectedId);
             var hitSomething = TryHitTestYawAligned(rayOrigin, rayDir, out var hitId);
@@ -260,20 +305,21 @@ namespace ThreeOS
             var portalAtPinch = _bridge.PortalAtNearPoint(pinchXr);
             var hitPortal = hitSomething ? _bridge.PortalForGhost(hitId) : 0UL;
 
-            // Task 6.6: armed scissors cut — cancel inside source BB, else paste.
-            var cutPortal = _bridge.VoodooCutPortal;
-            if (cutPortal != 0)
+            // Task 6.6: armed scissors cut — cancel inside any cut source BB, else paste all.
+            if (_bridge.VoodooCutActive)
             {
-                if (portalAtPinch == cutPortal)
+                if (portalAtPinch != 0 && _bridge.VoodooCutIsArmed(portalAtPinch))
                 {
                     _bridge.VoodooCutCancel();
+                    _host.MarkGhostsDirty();
                     _status = "cut cancelled";
                     _lastShortTapId = 0;
                     return;
                 }
 
+                // Paste into a Box that is not itself part of the cut set.
                 if (hitSomething && TryFindItem(hitId, out var pasteBox) && pasteBox.kind == 1 &&
-                    hitPortal != cutPortal)
+                    (hitPortal == 0 || !_bridge.VoodooCutIsArmed(hitPortal)))
                 {
                     if (_bridge.VoodooCutPasteInto(hitId))
                     {
@@ -282,6 +328,7 @@ namespace ThreeOS
                         _status = $"cut paste → {pasteBox.Name}";
                         _lastShortTapId = 0;
                         _host.Glyphs.ClearGhostViews();
+                        _host.MarkViewsDirty();
                     }
                     else
                     {
@@ -298,6 +345,7 @@ namespace ThreeOS
                     _status = portalAtPinch != 0 ? "cut paste → portal" : "cut paste → near field";
                     _lastShortTapId = 0;
                     _host.Glyphs.ClearGhostViews();
+                    _host.MarkViewsDirty();
                 }
                 else
                 {
@@ -332,6 +380,11 @@ namespace ThreeOS
             // Task 6.5: empty pinch with selection → deselect / summon / insert.
             if (selectedId != 0 && !hitSomething)
             {
+                // Palm-up is dismiss / menu — never empty-air deselect (Dismiss All must keep
+                // the far-field selection for MR carry / further telekinesis).
+                if (SelectHandPalmMode() == PalmMode.Up || ShouldSuppressSelectForVoodooDismiss())
+                    return;
+
                 // Selected ghost + empty inside home BB → deselect.
                 if (homePortal != 0 && portalAtPinch == homePortal)
                 {
@@ -345,6 +398,8 @@ namespace ThreeOS
                 // Near-field selection (post-summon or matrix real): open-air empty
                 // pinch deselects. Do not re-summon to the pinch — that left selection
                 // permanently sticky because every miss called summon again.
+                // After Dismiss All, portals are gone so homePortal reads 0 — that must
+                // NOT look like near-field empty deselect (see keep-selection window).
                 if (homePortal == 0 && portalAtPinch == 0)
                 {
                     _bridge.ClearSelection();

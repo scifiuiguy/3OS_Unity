@@ -22,6 +22,7 @@ namespace ThreeOS
         private string _status { get => _host.StatusField; set => _host.StatusField = value; }
         private string _demoRoot => _host.DemoRoot;
         private string _demoRoot2 => _host.DemoRoot2Field;
+        private string _demoRoot3 => _host.DemoRoot3Field;
         private Coroutine StartCoroutine(IEnumerator rut) => _host.StartCoroutinePublic(rut);
         private void Destroy(UnityEngine.Object o) { if (o != null) UnityEngine.Object.Destroy(o); }
 
@@ -76,48 +77,107 @@ namespace ThreeOS
             StartCoroutine(InsertSequence(ev));
         }
 
-        internal IEnumerator InsertSequence(InteropStorageEvent ev)
+        internal struct PasteUndoEntry
         {
-            _insertAnimBusy = true;
-            var ok = false;
-            var src = string.Empty;
-            var dst = string.Empty;
+            public string SrcRoot;
+            public string SourceRel;
+            public string DstRoot;
+            public string DestRel;
+            public bool IsFolder;
+        }
+
+        /// <summary>Last successful paste batch (multi-item paste = one batch). Debug undo only.</summary>
+        readonly List<PasteUndoEntry> _lastPasteBatch = new List<PasteUndoEntry>(8);
+        readonly Queue<PendingFsCut> _pendingFsCuts = new Queue<PendingFsCut>(64);
+        readonly object _pendingFsLock = new object();
+        ThreeOSPasteProgressBar _pasteBar;
+        int _pasteBatchCompleted;
+        int _pasteBatchKnownTotal;
+        BgCopyProgress _pasteCopyProgress;
+        int _pendingFsTotal;
+        int _pendingFsDone;
+        int _pendingFsFailed;
+
+        struct PendingFsCut
+        {
+            public bool IsFolder;
+            public string SourceRel;
+            public string DestRel;
+            public string SrcRoot;
+            public string DstRoot;
+        }
+
+        internal bool HasLastPasteBatch => _lastPasteBatch.Count > 0;
+
+        internal void ClearLastPasteBatch() => _lastPasteBatch.Clear();
+
+        internal IEnumerator InsertSequence(InteropStorageEvent ev, bool isContinuation = false)
+        {
+            // Hold busy through ack + FS drain so HandleStorageEvents cannot start a second
+            // InsertSequence that clears the queue / remounts mid-cut (Demo/Demo2 stayed put).
+            if (!isContinuation)
+                _insertAnimBusy = true;
+            // Optimistic ack: kernel already reparented. Waiting on MTP/Java per item was
+            // crushing Quest to 0–1 fps and false-acking (full visual revert) when verify lied.
+            var ok = true;
             // Note: C# forbids yield inside try/catch — use try/finally only.
             try
             {
-                // Dropping a child from an open cluster invalidates expand UI before views move.
-                TeardownAllExpandedBoxes(collapseKernel: true);
-
-                // Prefer far-field glyph; fall back to a near ghost of the destination box.
-                Transform bumpT = null;
-                if (_views.TryGetValue(ev.boxId, out var boxView) && boxView.Root != null)
+                // First event only: chrome teardown + short bump. Continuations skip —
+                // per-item RebuildViews was the double-paste lag/crash storm.
+                if (!isContinuation)
                 {
-                    bumpT = boxView.Root.transform;
-                }
-                else
-                {
-                    foreach (var kv in _ghostViews)
+                    // New paste session replaces the previous undo snapshot.
+                    _lastPasteBatch.Clear();
+                    lock (_pendingFsLock)
                     {
-                        if (kv.Value.EntityId == ev.boxId && kv.Value.Root != null)
+                        _pendingFsCuts.Clear();
+                        _pendingFsTotal = 0;
+                        _pendingFsDone = 0;
+                        _pendingFsFailed = 0;
+                    }
+
+                    _pasteBatchCompleted = 0;
+                    _pasteBatchKnownTotal = 1;
+                    TeardownAllExpandedBoxes(collapseKernel: true);
+
+                    Transform bumpT = null;
+                    if (_views.TryGetValue(ev.boxId, out var boxView) && boxView.Root != null)
+                    {
+                        bumpT = boxView.Root.transform;
+                    }
+                    else
+                    {
+                        foreach (var kv in _ghostViews)
                         {
-                            bumpT = kv.Value.Root.transform;
-                            break;
+                            if (kv.Value.EntityId == ev.boxId && kv.Value.Root != null)
+                            {
+                                bumpT = kv.Value.Root.transform;
+                                break;
+                            }
                         }
                     }
+
+                    EnsurePasteBar();
+                    if (bumpT != null)
+                    {
+                        _pasteBar.ShowAt(bumpT, bumpT.up * 0.12f);
+                        _bridge.SetBoxOpen(ev.boxId, true);
+                        var baseScale = bumpT.localScale;
+                        yield return AnimateScaleBump(bumpT, baseScale, 1.08f, 0.04f);
+                        _bridge.SetBoxOpen(ev.boxId, false);
+                    }
+                    else
+                    {
+                        var cam = Camera.main;
+                        if (cam != null)
+                            _pasteBar.ShowAt(cam.transform, cam.transform.forward * 0.55f + cam.transform.up * -0.05f);
+                    }
+
+                    _pasteBar.SetProgress(0f);
                 }
 
-                if (bumpT != null)
-                {
-                    _bridge.SetBoxOpen(ev.boxId, true);
-                    var baseScale = bumpT.localScale;
-                    yield return AnimateScaleBump(bumpT, baseScale, 1.15f, 0.12f);
-                    _bridge.SetBoxOpen(ev.boxId, false);
-                    yield return new WaitForSeconds(0.08f);
-                }
-                else
-                {
-                    yield return null;
-                }
+                yield return null;
 
                 ResolveInsertPaths(ev, out var objName, out var boxName, out var sourceRel,
                     out var destRel);
@@ -126,43 +186,322 @@ namespace ThreeOS
                     string.Equals(NormalizeDemoRel(sourceRel), NormalizeDemoRel(destRel),
                         System.StringComparison.OrdinalIgnoreCase))
                 {
-                    ok = true;
-                    dst = destRel;
                     _status = $"already in {boxName}/";
                 }
                 else
                 {
                     var sourceIsBox = _host.TryFindItem(ev.objectId, out var srcItem) && srcItem.kind == 1;
-                    _status = $"moving {objName} → {boxName}/";
-                    yield return CommitInsertToDisk(objName, boxName, sourceIsBox, sourceRel, destRel,
-                        result =>
-                        {
-                            ok = result.ok;
-                            src = result.src;
-                            dst = result.dst;
-                        });
+                    var srcRoot = _host.ResolveFsRootForEntity(ev.objectId, sourceRel);
+                    var dstRoot = _host.ResolveFsRootForEntity(ev.boxId, ParentRel(destRel));
+                    if (string.IsNullOrEmpty(dstRoot))
+                        dstRoot = _host.ResolveFsRootForEntity(ev.boxId, boxName);
+                    if (string.IsNullOrEmpty(srcRoot))
+                        srcRoot = _demoRoot;
+                    if (string.IsNullOrEmpty(dstRoot))
+                        dstRoot = srcRoot;
 
-                    _status = ok
-                        ? $"moved → {ShortPath(dst)}"
-                        : $"FS move failed — {ShortPath(string.IsNullOrEmpty(dst) ? src : dst)}";
-                    if (!ok)
+                    _status = $"queued {objName} → {boxName}/";
+                    _lastPasteBatch.Add(new PasteUndoEntry
                     {
-                        Debug.LogError($"[3OS] {_status} (src={src} dst={dst} root={_demoRoot})");
-                    }
-                    else
+                        SrcRoot = srcRoot,
+                        SourceRel = sourceRel,
+                        DstRoot = dstRoot,
+                        DestRel = destRel,
+                        IsFolder = sourceIsBox,
+                    });
+                    _host.RetargetEntityMindPalace(ev.objectId, ev.boxId);
+
+                    lock (_pendingFsLock)
                     {
-                        Debug.Log($"[3OS] {_status} (full={dst})");
+                        _pendingFsCuts.Enqueue(new PendingFsCut
+                        {
+                            IsFolder = sourceIsBox,
+                            SourceRel = sourceRel,
+                            DestRel = destRel,
+                            SrcRoot = srcRoot,
+                            DstRoot = dstRoot,
+                        });
+                        _pendingFsTotal++;
                     }
+
+                    Debug.Log($"[3OS] paste enqueue box={sourceIsBox} {sourceRel} → {destRel}");
+                }
+
+                _pasteBatchCompleted++;
+                RefreshPasteBarProgress(itemFraction: 1f);
+            }
+            finally
+            {
+                // Ack immediately so kernel keeps the new parents — FS drains before busy clears.
+                _bridge.AckStorageEvent(ok);
+            }
+
+            try
+            {
+                // Drain the kernel event queue fast (no per-item FS wait).
+                if (_bridge.TryPollStorageEvent(out var next) && next.type != 0 && next.awaitingAck != 0)
+                {
+                    _pasteBatchKnownTotal = Mathf.Max(_pasteBatchKnownTotal, _pasteBatchCompleted + 1);
+                    RefreshPasteBarProgress(itemFraction: 0f);
+                    yield return null;
+                    yield return InsertSequence(next, isContinuation: true);
+                }
+                else
+                {
+                    // All kernel events acked — drain disk cuts off the main thread.
+                    yield return DrainPendingFsCutsRoutine();
+                    _pasteBar?.SetProgress(1f);
+                    yield return null;
+                    if (_lastPasteBatch.Count > 0)
+                    {
+                        _host.InvalidatePalaceNamePrecache();
+                        _host.RequestPostPasteChildHeal();
+                    }
+
+                    _host.MarkViewsDirty();
+                    _host.MarkGhostsDirty();
+                    yield return null;
+                    _pasteBar?.Hide();
                 }
             }
             finally
             {
-                // Always ack + clear busy so a failed/aborted insert cannot disable grab.
-                _bridge.AckStorageEvent(ok);
-                _insertAnimBusy = false;
+                // Must clear even if ShellMv/JNI throws — a stuck busy bit silently drops all
+                // later pastes (no enqueue logs; Demo/Demo2 never move).
+                if (!isContinuation)
+                    _insertAnimBusy = false;
+            }
+        }
+
+        /// <summary>
+        /// Process queued folder/file cuts on the ThreadPool one-at-a-time.
+        /// Folder NIO/JNI runs via <see cref="ThreeOSAndroidStorage.RunWithJni"/> so the
+        /// Unity main thread only polls progress (no ~80–100ms stalls per folder).
+        /// </summary>
+        IEnumerator DrainPendingFsCutsRoutine()
+        {
+            _pasteCopyProgress = new BgCopyProgress();
+            while (true)
+            {
+                PendingFsCut job;
+                lock (_pendingFsLock)
+                {
+                    if (_pendingFsCuts.Count == 0)
+                        break;
+                    job = _pendingFsCuts.Dequeue();
+                }
+
+                var bg = new BgInsertState();
+                var jobCap = job;
+                var progress = _pasteCopyProgress;
+
+                System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try
+                    {
+                        ThreeOSAndroidStorage.RunWithJni(() =>
+                        {
+                            progress.totalFiles = Mathf.Max(1, progress.totalFiles);
+                            if (jobCap.IsFolder)
+                            {
+                                // Documents folders need Java NIO; managed Move usually fails.
+                                bg.ok = TryCutRelFolderCross(jobCap.SrcRoot, jobCap.SourceRel,
+                                    jobCap.DstRoot, jobCap.DestRel, progress);
+                                if (bg.ok)
+                                    ScrubRelFolderMirrors(jobCap.SourceRel, jobCap.SrcRoot);
+                            }
+                            else
+                            {
+                                byte[] data = null;
+                                var src = ThreeOSStorageController.CombineRootRelPublic(jobCap.SrcRoot,
+                                    jobCap.SourceRel);
+                                try
+                                {
+                                    if (ThreeOSDemoRootBootstrap.FileLooksPresent(src))
+                                        data = File.ReadAllBytes(src);
+                                }
+                                catch (System.Exception ex)
+                                {
+                                    Debug.LogWarning($"[3OS] deferred read {src}: {ex.Message}");
+                                }
+
+                                bg.ok = TryCutRelFileCross(jobCap.SrcRoot, jobCap.SourceRel, jobCap.DstRoot,
+                                    jobCap.DestRel, data);
+                                if (!bg.ok)
+                                {
+                                    Debug.LogWarning(
+                                        $"[3OS] managed cut missed — Java fallback file={jobCap.SourceRel}");
+                                    bg.ok = TryCutRelFileCrossJava(jobCap.SrcRoot, jobCap.SourceRel,
+                                        jobCap.DstRoot, jobCap.DestRel);
+                                }
+                            }
+
+                            Debug.Log(
+                                $"[3OS] deferred FS ok={bg.ok} folder={jobCap.IsFolder} {jobCap.SourceRel} → {jobCap.DestRel}");
+                        });
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogError("[3OS] deferred FS failed: " + ex.Message);
+                        bg.ok = false;
+                    }
+                    finally
+                    {
+                        System.Threading.Thread.MemoryBarrier();
+                        bg.done = true;
+                    }
+                });
+
+                var waited = 0f;
+                var lastStallLog = -30f;
+                while (!bg.done)
+                {
+                    int done;
+                    int total;
+                    lock (_pendingFsLock)
+                    {
+                        done = _pendingFsDone;
+                        total = Mathf.Max(1, _pendingFsTotal);
+                    }
+
+                    _pasteBar?.SetProgress(Mathf.Clamp01((done + 0.5f) / total));
+                    waited += Time.unscaledDeltaTime;
+                    if (waited - lastStallLog >= 30f)
+                    {
+                        lastStallLog = waited;
+                        Debug.Log(
+                            $"[3OS] deferred FS still running {waited:0}s {(jobCap.IsFolder ? "folder" : "file")}={jobCap.SourceRel}");
+                    }
+
+                    yield return null;
+                }
+
+                System.Threading.Thread.MemoryBarrier();
+
+                lock (_pendingFsLock)
+                {
+                    _pendingFsDone++;
+                    if (!bg.ok)
+                        _pendingFsFailed++;
+                    _pasteBar?.SetProgress(Mathf.Clamp01(_pendingFsDone / (float)Mathf.Max(1, _pendingFsTotal)));
+                }
             }
 
-            _host.RebuildViews();
+            int failed;
+            lock (_pendingFsLock)
+            {
+                failed = _pendingFsFailed;
+            }
+
+            if (failed > 0)
+            {
+                Debug.LogWarning(
+                    $"[3OS] deferred FS finished with {failed} failure(s) — remounting palace from disk");
+                yield return _host.RemountPalaceAfterDemoResetRoutine();
+            }
+            else
+            {
+                Debug.Log($"[3OS] deferred FS finished ok total={_pendingFsTotal}");
+            }
+        }
+
+        void EnsurePasteBar()
+        {
+            if (_pasteBar == null)
+                _pasteBar = ThreeOSPasteProgressBar.Create(_host.transform);
+        }
+
+        /// <summary>Hide paste UI immediately (mode wipe / soft-dismiss). Does not abort FS IO.</summary>
+        internal void CancelPasteProgressUi()
+        {
+            _pasteBar?.SetProgress(1f);
+            _pasteBar?.Hide();
+        }
+
+        void RefreshPasteBarProgress(float itemFraction)
+        {
+            if (_pasteBar == null)
+                return;
+            // knownTotal grows as the queue drains; denominator is always "done so far + remaining known".
+            var total = Mathf.Max(_pasteBatchKnownTotal, _pasteBatchCompleted + 1);
+            var done = Mathf.Max(0, _pasteBatchCompleted);
+            var t = (done + Mathf.Clamp01(itemFraction)) / total;
+            _pasteBar.SetProgress(Mathf.Clamp01(t));
+        }
+
+        /// <summary>
+        /// Debug: reverse the last paste batch on disk, then remount Mind Palace from FS
+        /// so kernel parents match. Invoked from Act I palms-down dual-ternary reset.
+        /// </summary>
+        internal IEnumerator UndoLastPasteRoutine()
+        {
+            if (_lastPasteBatch.Count == 0)
+            {
+                Debug.Log("[3OS] paste undo: nothing recorded");
+                yield break;
+            }
+
+            // Wait out an in-flight insert so we don't race the ThreadPool cut.
+            var wait = 0f;
+            while (_insertAnimBusy && wait < 10f)
+            {
+                wait += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            var batch = new List<PasteUndoEntry>(_lastPasteBatch);
+            _lastPasteBatch.Clear();
+            _bridge.VoodooCutCancel();
+
+            // JNI folder moves on ThreadPool (same as DrainPendingFsCutsRoutine).
+            for (var i = batch.Count - 1; i >= 0; i--)
+            {
+                var e = batch[i];
+                var bg = new BgInsertState();
+                System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try
+                    {
+                        ThreeOSAndroidStorage.RunWithJni(() =>
+                        {
+                            if (e.IsFolder)
+                                bg.ok = TryCutRelFolderCross(e.DstRoot, e.DestRel, e.SrcRoot, e.SourceRel);
+                            else
+                                bg.ok = TryCutRelFileCross(e.DstRoot, e.DestRel, e.SrcRoot, e.SourceRel, null);
+                        });
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogError("[3OS] paste undo FS failed: " + ex.Message);
+                        bg.ok = false;
+                    }
+                    finally
+                    {
+                        System.Threading.Thread.MemoryBarrier();
+                        bg.done = true;
+                    }
+                });
+
+                while (!bg.done)
+                    yield return null;
+                System.Threading.Thread.MemoryBarrier();
+
+                Debug.Log(
+                    $"[3OS] paste undo {(bg.ok ? "OK" : "FAIL")} {e.DestRel} @ {GuessFolderLeaf(e.DstRoot)} → {e.SourceRel} @ {GuessFolderLeaf(e.SrcRoot)}");
+            }
+
+            _host.InvalidatePalaceNamePrecache();
+            _status = "paste undone — remounting palace";
+            yield return _host.ForceReloadMindPalaceRoutine();
+            _status = "paste undone";
+            Debug.Log($"[3OS] paste undo complete ({batch.Count} item(s))");
+        }
+
+        static string ParentRel(string destRel)
+        {
+            var norm = NormalizeDemoRelPublic(destRel);
+            var slash = norm.LastIndexOf('/');
+            return slash > 0 ? norm.Substring(0, slash) : string.Empty;
         }
 
         /// <summary>
@@ -259,12 +598,14 @@ namespace ThreeOS
         }
 
         /// <summary>
-        /// Write-through insert: cut within each demo root (Documents first on Quest so the
-        /// MTP-visible original is renamed, not copied). Then scrub every root-level leftover.
-        /// Supports file Objects and folder Boxes (box-into-box), including nested rel paths.
+        /// Write-through insert. All Directory/File I/O runs on the ThreadPool — the
+        /// coroutine only waits. (Unity Jobs cannot call managed System.IO.)
+        /// <paramref name="srcRoot"/> / <paramref name="dstRoot"/> are absolute Mind Palace
+        /// roots (Demo1/2/3) so cross-cluster paste lands in the right folder.
         /// </summary>
         internal IEnumerator CommitInsertToDisk(string objName, string boxName, bool sourceIsBox,
-            string sourceRel, string destRel, System.Action<InsertFsResult> done)
+            string sourceRel, string destRel, string srcRoot, string dstRoot,
+            BgCopyProgress copyProgress, System.Action<InsertFsResult> done)
         {
             var result = new InsertFsResult
             {
@@ -278,158 +619,21 @@ namespace ThreeOS
                 ? NormalizeDemoRel($"{boxName}/{objName}")
                 : NormalizeDemoRel(destRel);
 
-            var docs = ThreeOSDemoRootBootstrap.PreferredDocumentsDemoPath();
-            var persistent = ThreeOSDemoRootBootstrap.FallbackPersistentDemoPath();
-            var writeRoot = string.IsNullOrEmpty(_demoRoot) ? persistent : _demoRoot;
+            if (string.IsNullOrEmpty(srcRoot))
+                srcRoot = _demoRoot;
+            if (string.IsNullOrEmpty(dstRoot))
+                dstRoot = srcRoot;
 
-            try
-            {
-                Directory.CreateDirectory(writeRoot);
-                var destParent = Path.GetDirectoryName(ThreeOSStorageController.CombineRootRelPublic(writeRoot, destRel));
-                if (!string.IsNullOrEmpty(destParent))
-                {
-                    Directory.CreateDirectory(destParent);
-                }
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogError($"[3OS] insert mkdir failed: {ex.Message}");
-                done?.Invoke(result);
-                yield break;
-            }
-
-            result.dst = ThreeOSStorageController.CombineRootRelPublic(writeRoot, destRel);
-            result.src = ThreeOSStorageController.CombineRootRelPublic(writeRoot, sourceRel);
-
-            if (sourceIsBox)
-            {
-                yield return CommitInsertFolderToDisk(sourceRel, destRel, docs, persistent, writeRoot,
-                    result, done);
-                yield break;
-            }
-
-            byte[] data = null;
-            string loadedFrom = null;
-
-            // Prefer reading from Documents (what the user browses), then persistent, then seed.
-            // Nested children use sourceRel (e.g. Parent/child.glb), not root leaf alone.
-            foreach (var candidate in new[]
-                     {
-                         ThreeOSStorageController.CombineRootRelPublic(docs, sourceRel),
-                         ThreeOSStorageController.CombineRootRelPublic(persistent, sourceRel),
-                         ThreeOSStorageController.CombineRootRelPublic(writeRoot, sourceRel),
-                         Path.Combine(docs, objName),
-                         Path.Combine(persistent, objName),
-                         Path.Combine(writeRoot, objName),
-                     })
-            {
-                if (string.IsNullOrEmpty(candidate) || !ThreeOSDemoRootBootstrap.FileLooksPresent(candidate))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    data = File.ReadAllBytes(candidate);
-                    if (data != null && data.Length > 0)
-                    {
-                        loadedFrom = candidate;
-                        result.src = candidate;
-                        break;
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    Debug.LogWarning($"[3OS] read {candidate}: {ex.Message}");
-                }
-            }
-
-            if (data == null || data.Length == 0)
-            {
-                foreach (var root in CandidateDemoRoots())
-                {
-                    foreach (var rel in new[] { sourceRel, objName })
-                    {
-                        var candidate = ThreeOSStorageController.CombineRootRelPublic(root, rel);
-                        if (!ThreeOSDemoRootBootstrap.FileLooksPresent(candidate))
-                        {
-                            continue;
-                        }
-
-                        try
-                        {
-                            data = File.ReadAllBytes(candidate);
-                            loadedFrom = candidate;
-                            result.src = candidate;
-                            break;
-                        }
-                        catch (System.Exception ex)
-                        {
-                            Debug.LogWarning($"[3OS] read {candidate}: {ex.Message}");
-                        }
-                    }
-
-                    if (data != null && data.Length > 0)
-                    {
-                        break;
-                    }
-                }
-            }
-
-            if (data == null || data.Length == 0)
-            {
-                var seedUrl = Path.Combine(Application.streamingAssetsPath, "3OS", "seed", "simple.glb");
 #if UNITY_ANDROID && !UNITY_EDITOR
-                using (var req = UnityWebRequest.Get(seedUrl))
-                {
-                    var op = req.SendWebRequest();
-                    var waited = 0f;
-                    while (!op.isDone && waited < 5f)
-                    {
-                        waited += Time.unscaledDeltaTime;
-                        yield return null;
-                    }
-
-                    if (op.isDone && req.result == UnityWebRequest.Result.Success)
-                    {
-                        data = req.downloadHandler.data;
-                        loadedFrom = seedUrl;
-                    }
-                    else if (!op.isDone)
-                    {
-                        req.Abort();
-                    }
-                }
-#else
-                if (File.Exists(seedUrl))
-                {
-                    data = File.ReadAllBytes(seedUrl);
-                    loadedFrom = seedUrl;
-                }
-
-                yield return null;
-#endif
-            }
-
-            if (data == null || data.Length == 0)
+            // Permission prompt must stay on the main thread.
+            var srcDocs = ThreeOSDemoRootBootstrap.DocumentsPath(
+                GuessFolderLeaf(srcRoot));
+            var needsDocs = ThreeOSDemoRootBootstrap.DirectoryLooksPresent(
+                                ThreeOSStorageController.CombineRootRelPublic(srcDocs, sourceRel)) ||
+                            ThreeOSDemoRootBootstrap.FileLooksPresent(
+                                ThreeOSStorageController.CombineRootRelPublic(srcDocs, sourceRel));
+            if (needsDocs && !ThreeOSAndroidStorage.IsExternalStorageManager())
             {
-                Debug.LogError("[3OS] insert: no source bytes for " + objName);
-                done?.Invoke(result);
-                yield break;
-            }
-
-            var docsSrc = ThreeOSStorageController.CombineRootRelPublic(docs, sourceRel);
-            var needsDocumentsCut = ThreeOSDemoRootBootstrap.FileLooksPresent(docsSrc) ||
-                                    string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase) ||
-                                    (loadedFrom != null && loadedFrom.StartsWith(docs,
-                                        System.StringComparison.OrdinalIgnoreCase));
-
-            // Without all-files access, Documents writes can succeed while deletes fail → copy.
-            // Do not touch Documents until permission is granted; roll back the glyph (ack false).
-#if UNITY_ANDROID && !UNITY_EDITOR
-            if (needsDocumentsCut && !ThreeOSAndroidStorage.IsExternalStorageManager())
-            {
-                Debug.LogWarning("[3OS] deferring Documents cut until all-files access is granted");
                 yield return EnsureAllFilesAccessForCut("grant All files access, then drop again");
                 if (!ThreeOSAndroidStorage.IsExternalStorageManager())
                 {
@@ -441,148 +645,560 @@ namespace ThreeOS
             }
 #endif
 
-            // Cut Documents only with all-files access (otherwise write can succeed and delete fail).
-            var cutDocs = false;
-            if (ThreeOSAndroidStorage.IsExternalStorageManager())
-            {
-                cutDocs = TryCutRelFile(docs, sourceRel, destRel, data);
-            }
+            var srcRootCap = srcRoot;
+            var dstRootCap = dstRoot;
+            var sourceRelCap = sourceRel;
+            var destRelCap = destRel;
+            var sourceIsBoxCap = sourceIsBox;
+            var progress = copyProgress ?? new BgCopyProgress();
 
-            var cutPers = TryCutRelFile(persistent, sourceRel, destRel, data);
-            if (!string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(writeRoot, persistent, System.StringComparison.OrdinalIgnoreCase))
-            {
-                TryCutRelFile(writeRoot, sourceRel, destRel, data);
-            }
+            result.src = ThreeOSStorageController.CombineRootRelPublic(srcRootCap, sourceRelCap);
+            result.dst = ThreeOSStorageController.CombineRootRelPublic(dstRootCap, destRelCap);
 
-            var docsDst = ThreeOSStorageController.CombineRootRelPublic(docs, destRel);
-            var persDst = ThreeOSStorageController.CombineRootRelPublic(persistent, destRel);
-            var destLanded = DestFileOk(docsDst) || DestFileOk(persDst) || DestFileOk(result.dst);
-
-            if (DestFileOk(docsDst))
+            // Prefer ThreadPool + System.IO for folders AND files so the loading bar does not
+            // stall the render thread. Java/JNI rename is main-thread-only and is a fallback
+            // when managed Move/Copy cannot relocate MTP Documents folders.
+            var bg = new BgInsertState
             {
-                result.dst = docsDst;
-                result.src = docsSrc;
-            }
-            else if (DestFileOk(persDst))
-            {
-                result.dst = persDst;
-                result.src = ThreeOSStorageController.CombineRootRelPublic(persistent, sourceRel);
-            }
+                src = result.src,
+                dst = result.dst,
+            };
 
-            result.ok = cutDocs || cutPers || destLanded;
-            Debug.Log(
-                $"[3OS] insert cut docs={cutDocs} pers={cutPers} destOk={destLanded} from={loadedFrom} → {result.dst}");
-
-            // Only scrub source AFTER a box destination exists — never delete the only copy.
-            if (destLanded || DestFileOk(docsDst) || DestFileOk(persDst))
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
-                for (var attempt = 0; attempt < 6; attempt++)
+                try
                 {
-                    TryDeleteFile(ThreeOSStorageController.CombineRootRelPublic(docs, sourceRel));
-                    TryDeleteFile(ThreeOSStorageController.CombineRootRelPublic(persistent, sourceRel));
-                    // MediaStore: nested relative under Documents/DemoFolder.
-                    var mediaDir = "Documents/" + ThreeOSStorageController.DemoFolderName + "/";
-                    var slash = sourceRel.LastIndexOf('/');
-                    if (slash > 0)
+                    try
                     {
-                        mediaDir += sourceRel.Substring(0, slash + 1);
-                        ThreeOSAndroidStorage.MediaStoreDeleteByRelativeName(mediaDir,
-                            sourceRel.Substring(slash + 1));
+                        var destParent = Path.GetDirectoryName(bg.dst);
+                        if (!string.IsNullOrEmpty(destParent))
+                            Directory.CreateDirectory(destParent);
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogError($"[3OS] insert mkdir failed: {ex.Message}");
+                        return;
+                    }
+
+                    if (sourceIsBoxCap)
+                    {
+                        bg.ok = TryCutRelFolderCrossManaged(srcRootCap, sourceRelCap, dstRootCap,
+                            destRelCap, progress);
+                        if (bg.ok)
+                            ScrubRelFolderMirrors(sourceRelCap, srcRootCap);
                     }
                     else
                     {
-                        ThreeOSAndroidStorage.MediaStoreDeleteByRelativeName(mediaDir, sourceRel);
+                        progress.totalFiles = 1;
+                        byte[] data = null;
+                        try
+                        {
+                            if (ThreeOSDemoRootBootstrap.FileLooksPresent(bg.src))
+                                data = File.ReadAllBytes(bg.src);
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Debug.LogWarning($"[3OS] read {bg.src}: {ex.Message}");
+                        }
+
+                        bg.ok = TryCutRelFileCross(srcRootCap, sourceRelCap, dstRootCap, destRelCap,
+                            data);
+                        progress.doneFiles = bg.ok ? 1 : 0;
                     }
 
-                    if (!ThreeOSDemoRootBootstrap.FileLooksPresent(ThreeOSStorageController.CombineRootRelPublic(docs, sourceRel)) &&
-                        !ThreeOSDemoRootBootstrap.FileLooksPresent(ThreeOSStorageController.CombineRootRelPublic(persistent, sourceRel)))
-                    {
-                        break;
-                    }
-
-                    yield return null;
+                    Debug.Log(
+                        $"[3OS] bg insert ok={bg.ok} box={sourceIsBoxCap} {bg.src} → {bg.dst}");
                 }
-
-                if (ThreeOSDemoRootBootstrap.FileLooksPresent(ThreeOSStorageController.CombineRootRelPublic(docs, sourceRel)) &&
-                    !ThreeOSAndroidStorage.IsExternalStorageManager())
+                catch (System.Exception ex)
                 {
-                    _waitingForAllFilesAccess = true;
-                    _status = "grant All files access, then drop again";
+                    Debug.LogError($"[3OS] bg insert failed: {ex.Message}");
+                    bg.ok = false;
                 }
+                finally
+                {
+                    System.Threading.Thread.MemoryBarrier();
+                    bg.done = true;
+                }
+            });
+
+            var waited = 0f;
+            while (!bg.done && waited < 45f)
+            {
+                RefreshPasteBarProgress(progress.Fraction);
+                waited += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            System.Threading.Thread.MemoryBarrier();
+            if (!bg.done)
+            {
+                Debug.LogError("[3OS] bg insert timed out");
+                result.ok = false;
             }
             else
             {
-                Debug.LogError("[3OS] insert: destination never landed — left source intact");
-                result.ok = false;
+                result.ok = bg.ok;
+                result.src = bg.src ?? string.Empty;
+                result.dst = bg.dst ?? string.Empty;
             }
 
+            // No Java/JNI fallback here — that path blocked the Quest render thread during
+            // multi-item paste. Callers that need Java (rare) use TryCutRelFolderCross on main.
             done?.Invoke(result);
         }
 
-        internal IEnumerator CommitInsertFolderToDisk(string sourceRel, string destRel, string docs,
-            string persistent, string writeRoot, InsertFsResult result, System.Action<InsertFsResult> done)
+        sealed class BgInsertState
         {
-            var docsSrc = ThreeOSStorageController.CombineRootRelPublic(docs, sourceRel);
-            var needsDocumentsCut = ThreeOSDemoRootBootstrap.DirectoryLooksPresent(docsSrc) ||
-                                    string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase);
+            public volatile bool done;
+            public bool ok;
+            public string src = string.Empty;
+            public string dst = string.Empty;
+        }
 
-#if UNITY_ANDROID && !UNITY_EDITOR
-            if (needsDocumentsCut && !ThreeOSAndroidStorage.IsExternalStorageManager())
+        internal sealed class BgCopyProgress
+        {
+            public volatile int totalFiles;
+            public volatile int doneFiles;
+            public float Fraction
             {
-                Debug.LogWarning("[3OS] deferring folder Documents cut until all-files access");
-                yield return EnsureAllFilesAccessForCut("grant All files access, then drop again");
-                if (!ThreeOSAndroidStorage.IsExternalStorageManager())
+                get
                 {
-                    result.ok = false;
-                    _status = "grant All files access, then drop again";
-                    done?.Invoke(result);
-                    yield break;
+                    var t = totalFiles;
+                    if (t <= 0)
+                        return 0f;
+                    return Mathf.Clamp01(doneFiles / (float)t);
                 }
             }
-#else
-            yield return null;
-#endif
+        }
 
-            var cutDocs = false;
-            if (ThreeOSAndroidStorage.IsExternalStorageManager())
+        static string GuessFolderLeaf(string absRoot)
+        {
+            if (string.IsNullOrEmpty(absRoot))
+                return ThreeOSStorageController.DemoFolderName;
+            var leaf = Path.GetFileName(absRoot.TrimEnd('/', '\\'));
+            return string.IsNullOrEmpty(leaf) ? ThreeOSStorageController.DemoFolderName : leaf;
+        }
+
+        /// <summary>
+        /// ThreadPool-safe folder cut: System.IO only (no AndroidJavaObject / JNI).
+        /// </summary>
+        bool TryCutRelFolderCrossManaged(string srcRoot, string sourceRel, string dstRoot,
+            string destRel, BgCopyProgress progress = null)
+        {
+            var src = ThreeOSStorageController.CombineRootRelPublic(srcRoot, sourceRel);
+            var dst = ThreeOSStorageController.CombineRootRelPublic(dstRoot, destRel);
+            if (!ThreeOSDemoRootBootstrap.DirectoryLooksPresent(src))
+                return ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst);
+
+            try
             {
-                cutDocs = TryCutRelFolder(docs, sourceRel, destRel);
+                var parent = Path.GetDirectoryName(dst);
+                if (!string.IsNullOrEmpty(parent))
+                    Directory.CreateDirectory(parent);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[3OS] folder mkdir " + dst + ": " + ex.Message);
             }
 
-            var cutPers = TryCutRelFolder(persistent, sourceRel, destRel);
-            if (!string.Equals(writeRoot, docs, System.StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(writeRoot, persistent, System.StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(src, dst, System.StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (IsPathUnderOrEqual(dst, src))
             {
-                TryCutRelFolder(writeRoot, sourceRel, destRel);
+                Debug.LogError("[3OS] refuse folder paste: destination is under source " + src + " → " + dst);
+                return false;
             }
 
-            var docsDst = ThreeOSStorageController.CombineRootRelPublic(docs, destRel);
-            var persDst = ThreeOSStorageController.CombineRootRelPublic(persistent, destRel);
-            var destLanded = ThreeOSDemoRootBootstrap.DirectoryLooksPresent(docsDst) || ThreeOSDemoRootBootstrap.DirectoryLooksPresent(persDst) ||
-                             ThreeOSDemoRootBootstrap.DirectoryLooksPresent(result.dst);
-
-            if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(docsDst))
+            try
             {
-                result.dst = docsDst;
-                result.src = docsSrc;
+                if (Directory.Exists(dst))
+                    Directory.Delete(dst, true);
             }
-            else if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(persDst))
+            catch { /* best-effort */ }
+
+            var moveThrew = false;
+            try
             {
-                result.dst = persDst;
-                result.src = ThreeOSStorageController.CombineRootRelPublic(persistent, sourceRel);
+                Directory.Move(src, dst);
             }
-
-            result.ok = cutDocs || cutPers || destLanded;
-            Debug.Log(
-                $"[3OS] folder insert cut docs={cutDocs} pers={cutPers} destOk={destLanded} {sourceRel} → {result.dst}");
-
-            if (!result.ok)
+            catch (System.Exception ex)
             {
-                Debug.LogError("[3OS] folder insert: destination never landed — left source intact");
+                moveThrew = true;
+                Debug.LogWarning("[3OS] managed folder move " + src + " → " + dst + ": " + ex.Message);
             }
 
-            done?.Invoke(result);
+            // Quest MTP often still reports src after a successful Move. If dest is present,
+            // treat as success — never delete dest on a false-negative verify (that caused
+            // disk-ok / kernel-ack(false) desync: empty DemonProject in-scene, full on disk).
+            if (!moveThrew && ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst))
+            {
+                if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(src))
+                {
+                    try { Directory.Delete(src, true); } catch { /* MTP ghost */ }
+                }
+
+                MarkFolderCutProgressDone(progress);
+                return true;
+            }
+
+            try
+            {
+                if (progress != null && progress.totalFiles <= 0)
+                    progress.totalFiles = Mathf.Max(1, CountFilesRecursive(src));
+                CopyDirectoryRecursive(src, dst, progress);
+                try { Directory.Delete(src, true); } catch { /* best-effort */ }
+                if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst))
+                {
+                    MarkFolderCutProgressDone(progress);
+                    return true;
+                }
+
+                return false;
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[3OS] managed folder copy failed " + src + " → " + dst + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Move/copy a relative folder from srcRoot to dstRoot (may differ).
+        /// Safe on a ThreadPool worker after <see cref="ThreeOSAndroidStorage.RunWithJni"/>.
+        /// </summary>
+        bool TryCutRelFolderCross(string srcRoot, string sourceRel, string dstRoot, string destRel,
+            BgCopyProgress progress = null)
+        {
+            var src = ResolveExistingFolderAbs(srcRoot, sourceRel);
+            var dst = ThreeOSStorageController.CombineRootRelPublic(dstRoot, destRel);
+            Debug.Log($"[3OS] folder cut abs {src} → {dst}");
+            ThreeOSAndroidStorage.AppendPasteFsLog($"folder cut abs {src} → {dst}");
+            if (!ThreeOSDemoRootBootstrap.DirectoryLooksPresent(src) &&
+                !ThreeOSAndroidStorage.Exists(src))
+            {
+                Debug.LogWarning($"[3OS] folder cut src missing {sourceRel} (root={srcRoot})");
+                ThreeOSAndroidStorage.AppendPasteFsLog($"src missing {sourceRel} root={srcRoot}");
+                return ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst) ||
+                       ThreeOSAndroidStorage.Exists(dst);
+            }
+
+            try
+            {
+                var parent = Path.GetDirectoryName(dst);
+                if (!string.IsNullOrEmpty(parent))
+                    Directory.CreateDirectory(parent);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[3OS] folder mkdir " + dst + ": " + ex.Message);
+            }
+
+            if (string.Equals(src, dst, System.StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // Pasting a folder into itself (or a descendant) creates DemonProject/DemonProject/...
+            // path bombs that break Windows MTP with "device is no longer connected".
+            if (IsPathUnderOrEqual(dst, src))
+            {
+                Debug.LogError("[3OS] refuse folder paste: destination is under source " + src + " → " + dst);
+                return false;
+            }
+
+            TryRemoveDirectoryBestEffort(dst);
+
+            // NIO once landed Test12 as a dir; Os.rename + ProcessBuilder sh mv next;
+            // Runtime.exec(String[]) was the wrong overload and could stick insertAnimBusy.
+            var moved = ThreeOSAndroidStorage.JavaNioMove(src, dst);
+            ThreeOSAndroidStorage.AppendPasteFsLog($"NIO={moved} {src}");
+            if (!moved)
+            {
+                moved = ThreeOSAndroidStorage.OsRename(src, dst);
+                ThreeOSAndroidStorage.AppendPasteFsLog($"OsRename={moved}");
+            }
+
+            if (!moved)
+            {
+                moved = ThreeOSAndroidStorage.ShellMv(src, dst);
+                ThreeOSAndroidStorage.AppendPasteFsLog($"ShellMv={moved}");
+            }
+
+            if (!moved)
+            {
+                moved = ThreeOSAndroidStorage.JavaRename(src, dst);
+                ThreeOSAndroidStorage.AppendPasteFsLog($"renameTo={moved}");
+            }
+
+            if (moved)
+            {
+                if (FolderDestLanded(src, dst))
+                {
+                    MarkFolderCutProgressDone(progress);
+                    ThreeOSAndroidStorage.AppendPasteFsLog($"folder OK {destRel}");
+                    return true;
+                }
+
+                Debug.LogWarning("[3OS] Java folder move reported OK but verify failed " + src + " → " + dst);
+                ThreeOSAndroidStorage.AppendPasteFsLog($"verify fail {src} → {dst}");
+            }
+
+            try
+            {
+                Directory.Move(src, dst);
+                if (FolderDestLanded(src, dst))
+                {
+                    MarkFolderCutProgressDone(progress);
+                    return true;
+                }
+
+                Debug.LogWarning("[3OS] Directory.Move returned without relocating " + src + " → " + dst);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[3OS] folder move " + src + " → " + dst + ": " + ex.Message + "; copy+delete");
+            }
+
+            try
+            {
+                if (progress != null && progress.totalFiles <= 0)
+                    progress.totalFiles = Mathf.Max(1, CountFilesRecursive(src));
+                if (!ThreeOSAndroidStorage.JavaCopyDirectory(src, dst))
+                    CopyDirectoryRecursive(src, dst, progress);
+                else if (progress != null)
+                    MarkFolderCutProgressDone(progress);
+                TryRemoveDirectoryBestEffort(src);
+                if (FolderDestLanded(src, dst))
+                    return true;
+
+                // Dest missing — real failure. Never delete a present dest because MTP still
+                // lists src (that wiped successful pastes and remounted Demo/Demo2 in place).
+                Debug.LogError("[3OS] folder cut incomplete (dest missing) " + src + " → " + dst);
+                return false;
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError("[3OS] folder copy failed " + src + " → " + dst + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Dest present = success. If MTP still lists src, scrub it; do not roll back dest.
+        /// </summary>
+        bool FolderDestLanded(string src, string dst)
+        {
+            if (!ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst) &&
+                !ThreeOSAndroidStorage.Exists(dst))
+                return false;
+
+            if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(src) ||
+                ThreeOSAndroidStorage.Exists(src))
+                TryRemoveDirectoryBestEffort(src);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Prefer preferredRoot, else Documents/persistent mirrors that actually contain the folder.
+        /// </summary>
+        string ResolveExistingFolderAbs(string preferredRoot, string sourceRel)
+        {
+            var primary = ThreeOSStorageController.CombineRootRelPublic(preferredRoot, sourceRel);
+            if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(primary) ||
+                ThreeOSAndroidStorage.Exists(primary))
+                return primary;
+
+            var leaf = GuessFolderLeaf(preferredRoot);
+            foreach (var root in CandidateDemoRootsFor(leaf))
+            {
+                if (string.Equals(root, preferredRoot, System.StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var cand = ThreeOSStorageController.CombineRootRelPublic(root, sourceRel);
+                if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(cand) ||
+                    ThreeOSAndroidStorage.Exists(cand))
+                {
+                    Debug.Log($"[3OS] folder cut retarget src {primary} → {cand}");
+                    return cand;
+                }
+            }
+
+            // Cross-palace: also probe Demo1/2/3 Documents + persistent for this relative path.
+            foreach (var folderLeaf in new[]
+                     {
+                         ThreeOSStorageController.DemoFolderName,
+                         ThreeOSStorageController.DemoFolderName2,
+                         ThreeOSStorageController.DemoFolderName3,
+                     })
+            {
+                foreach (var root in CandidateDemoRootsFor(folderLeaf))
+                {
+                    var cand = ThreeOSStorageController.CombineRootRelPublic(root, sourceRel);
+                    if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(cand) ||
+                        ThreeOSAndroidStorage.Exists(cand))
+                    {
+                        Debug.Log($"[3OS] folder cut retarget-any src → {cand}");
+                        return cand;
+                    }
+                }
+            }
+
+            return primary;
+        }
+
+        /// <summary>Main-thread Java/NIO file cut for Documents when System.IO missed.</summary>
+        bool TryCutRelFileCrossJava(string srcRoot, string sourceRel, string dstRoot, string destRel)
+        {
+            var src = ThreeOSStorageController.CombineRootRelPublic(srcRoot, sourceRel);
+            var dst = ThreeOSStorageController.CombineRootRelPublic(dstRoot, destRel);
+            if (!ThreeOSDemoRootBootstrap.FileLooksPresent(src) && !ThreeOSAndroidStorage.Exists(src))
+                return ThreeOSDemoRootBootstrap.FileLooksPresent(dst) || ThreeOSAndroidStorage.Exists(dst);
+
+            try
+            {
+                var parent = Path.GetDirectoryName(dst);
+                if (!string.IsNullOrEmpty(parent))
+                    Directory.CreateDirectory(parent);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[3OS] Java file mkdir " + dst + ": " + ex.Message);
+            }
+
+            if (string.Equals(src, dst, System.StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (ThreeOSAndroidStorage.OsRename(src, dst) ||
+                ThreeOSAndroidStorage.ShellMv(src, dst) ||
+                ThreeOSAndroidStorage.JavaNioMove(src, dst) ||
+                ThreeOSAndroidStorage.JavaRename(src, dst))
+            {
+                if (ThreeOSDemoRootBootstrap.FileLooksPresent(dst) || ThreeOSAndroidStorage.Exists(dst))
+                {
+                    TryDeleteFile(src);
+                    return true;
+                }
+            }
+
+            // Last resort: managed copy path (may still work for small files).
+            byte[] data = null;
+            try
+            {
+                if (ThreeOSDemoRootBootstrap.FileLooksPresent(src))
+                    data = File.ReadAllBytes(src);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[3OS] Java file read " + src + ": " + ex.Message);
+            }
+
+            return TryCutRelFileCross(srcRoot, sourceRel, dstRoot, destRel, data);
+        }
+
+        static bool FolderCutLanded(string src, string dst) =>
+            ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst) &&
+            !ThreeOSDemoRootBootstrap.DirectoryLooksPresent(src);
+
+        static void MarkFolderCutProgressDone(BgCopyProgress progress)
+        {
+            if (progress == null)
+                return;
+            progress.totalFiles = Mathf.Max(1, progress.totalFiles);
+            progress.doneFiles = progress.totalFiles;
+        }
+
+        static void TryRemoveDirectoryBestEffort(string path)
+        {
+            if (string.IsNullOrEmpty(path) ||
+                !ThreeOSDemoRootBootstrap.DirectoryLooksPresent(path))
+                return;
+
+            try { Directory.Delete(path, true); }
+            catch { /* fall through to Java */ }
+
+            if (!ThreeOSDemoRootBootstrap.DirectoryLooksPresent(path))
+                return;
+
+            // Recursive Java delete for MTP leftovers System.IO cannot unlink.
+            try
+            {
+                foreach (var file in Directory.GetFiles(path))
+                    ThreeOSAndroidStorage.JavaDelete(file);
+                foreach (var dir in Directory.GetDirectories(path))
+                    TryRemoveDirectoryBestEffort(dir);
+            }
+            catch { /* best-effort */ }
+
+            ThreeOSAndroidStorage.JavaDelete(path);
+            try { Directory.Delete(path, true); } catch { /* best-effort */ }
+        }
+
+        bool TryCutRelFileCross(string srcRoot, string sourceRel, string dstRoot, string destRel, byte[] data)
+        {
+            var src = ThreeOSStorageController.CombineRootRelPublic(srcRoot, sourceRel);
+            var dst = ThreeOSStorageController.CombineRootRelPublic(dstRoot, destRel);
+
+            try
+            {
+                var parent = Path.GetDirectoryName(dst);
+                if (!string.IsNullOrEmpty(parent))
+                    Directory.CreateDirectory(parent);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[3OS] file mkdir " + dst + ": " + ex.Message);
+            }
+
+            if (data != null && data.Length > 0)
+            {
+                try
+                {
+                    File.WriteAllBytes(dst, data);
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning("[3OS] write " + dst + ": " + ex.Message);
+                }
+            }
+            else if (ThreeOSDemoRootBootstrap.FileLooksPresent(src) &&
+                     !string.Equals(src, dst, System.StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    File.Copy(src, dst, true);
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning("[3OS] copy " + src + " → " + dst + ": " + ex.Message);
+                }
+            }
+
+            // Prefer any visible dest — FileInfo.Length can throw/lie on MTP right after write.
+            var landed = DestFileOk(dst) || ThreeOSDemoRootBootstrap.FileLooksPresent(dst) ||
+                         ThreeOSAndroidStorage.Exists(dst);
+            if (landed && !string.Equals(src, dst, System.StringComparison.OrdinalIgnoreCase))
+                TryDeleteFile(src);
+
+            return landed;
+        }
+
+        void ScrubRelFolderMirrors(string sourceRel, string keepAbsRoot)
+        {
+            var leaf = GuessFolderLeaf(keepAbsRoot);
+            foreach (var root in CandidateDemoRootsFor(leaf))
+            {
+                if (string.Equals(root, keepAbsRoot, System.StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var path = ThreeOSStorageController.CombineRootRelPublic(root, sourceRel);
+                try
+                {
+                    if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(path))
+                        Directory.Delete(path, true);
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning("[3OS] scrub mirror " + path + ": " + ex.Message);
+                }
+            }
         }
 
         internal static IEnumerator AnimateScaleBump(Transform t, Vector3 baseScale, float peak,
@@ -681,6 +1297,15 @@ namespace ThreeOS
                 return ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst);
             }
 
+            if (string.Equals(src, dst, System.StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (IsPathUnderOrEqual(dst, src))
+            {
+                Debug.LogError("[3OS] refuse folder cut: destination is under source " + src + " → " + dst);
+                return false;
+            }
+
             if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst))
             {
                 return true;
@@ -700,10 +1325,22 @@ namespace ThreeOS
                 return false;
             }
 
+            TryRemoveDirectoryBestEffort(dst);
+
+            if (ThreeOSAndroidStorage.JavaNioMove(src, dst) ||
+                ThreeOSAndroidStorage.JavaRename(src, dst))
+            {
+                if (FolderCutLanded(src, dst))
+                {
+                    Debug.Log($"[3OS] folder Java move OK {src} → {dst}");
+                    return true;
+                }
+            }
+
             try
             {
                 Directory.Move(src, dst);
-                if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst))
+                if (FolderCutLanded(src, dst))
                 {
                     Debug.Log($"[3OS] folder Move OK {src} → {dst}");
                     return true;
@@ -716,22 +1353,18 @@ namespace ThreeOS
 
             try
             {
-                CopyDirectoryRecursive(src, dst);
+                if (!ThreeOSAndroidStorage.JavaCopyDirectory(src, dst))
+                    CopyDirectoryRecursive(src, dst);
                 if (!ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst))
-                {
                     return false;
-                }
 
-                try
-                {
-                    Directory.Delete(src, true);
-                }
-                catch (System.Exception ex)
-                {
-                    Debug.LogWarning($"[3OS] folder delete after copy {src}: {ex.Message}");
-                }
+                TryRemoveDirectoryBestEffort(src);
+                if (FolderCutLanded(src, dst))
+                    return true;
 
-                return true;
+                Debug.LogError($"[3OS] folder cut incomplete (src still present) {src}");
+                TryRemoveDirectoryBestEffort(dst);
+                return false;
             }
             catch (System.Exception ex)
             {
@@ -740,19 +1373,70 @@ namespace ThreeOS
             }
         }
 
-        internal static void CopyDirectoryRecursive(string src, string dst)
+        /// <summary>
+        /// True when <paramref name="path"/> is the same as <paramref name="ancestor"/> or nested under it.
+        /// Used to block self-paste path bombs (folder copied into its own descendant).
+        /// </summary>
+        internal static bool IsPathUnderOrEqual(string path, string ancestor)
         {
+            if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(ancestor))
+                return false;
+            try
+            {
+                var p = Path.GetFullPath(path)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var a = Path.GetFullPath(ancestor)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (string.Equals(p, a, System.StringComparison.OrdinalIgnoreCase))
+                    return true;
+                var prefix = a + Path.DirectorySeparatorChar;
+                return p.StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static int CountFilesRecursive(string src)
+        {
+            var n = 0;
+            try
+            {
+                n += Directory.GetFiles(src).Length;
+                foreach (var dir in Directory.GetDirectories(src))
+                    n += CountFilesRecursive(dir);
+            }
+            catch
+            {
+                /* best-effort */
+            }
+
+            return n;
+        }
+
+        internal static void CopyDirectoryRecursive(string src, string dst, BgCopyProgress progress = null)
+        {
+            if (IsPathUnderOrEqual(dst, src))
+                throw new System.InvalidOperationException(
+                    "refusing recursive copy into source tree: " + src + " → " + dst);
+
             Directory.CreateDirectory(dst);
             foreach (var file in Directory.GetFiles(src))
             {
                 var name = Path.GetFileName(file);
                 File.Copy(file, Path.Combine(dst, name), true);
+                if (progress != null)
+                    progress.doneFiles++;
             }
 
             foreach (var dir in Directory.GetDirectories(src))
             {
                 var name = Path.GetFileName(dir);
-                CopyDirectoryRecursive(dir, Path.Combine(dst, name));
+                var childDst = Path.Combine(dst, name);
+                if (IsPathUnderOrEqual(childDst, src))
+                    continue;
+                CopyDirectoryRecursive(dir, childDst, progress);
             }
         }
 
@@ -914,6 +1598,12 @@ namespace ThreeOS
                 !string.IsNullOrEmpty(_demoRoot2))
             {
                 yield return _demoRoot2;
+            }
+
+            if (string.Equals(folderLeaf, ThreeOSStorageController.DemoFolderName3, System.StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrEmpty(_demoRoot3))
+            {
+                yield return _demoRoot3;
             }
         }
 

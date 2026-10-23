@@ -214,6 +214,11 @@ namespace ThreeOS
             if (!rising)
                 return;
 
+            // Palm-up + secondary is also Voodoo Dismiss / Dismiss All. Core runs
+            // dismiss in threeos_tick; skip Multi-Choice when that gesture consumed.
+            if (Bridge.VoodooDismissGestureResult != 0)
+                return;
+
             var hand = intents.handedness <= 1 ? intents.handedness : 1u;
             if (!Bridge.TryGetCursor(hand, out var cursor) || cursor.active == 0)
                 return;
@@ -527,11 +532,14 @@ namespace ThreeOS
                         micRoot.transform.localPosition = lp;
                         // Fit inside shell; counter OpenXR→Unity X-mirror like labels/arrows.
                         // +10% on Speak pinch (speakSelectMul), same as shell.
-                        var micSize = SlotSizeM * 0.62f * (hover ? 1.08f : 1f) * speakSelectMul;
+                        // Keep mic inside the shell (was poking through when oversized / Z-fight).
+                        var micSize = SlotSizeM * 0.48f * (hover ? 1.08f : 1f) * speakSelectMul;
                         micRoot.transform.localScale = new Vector3(-micSize, micSize, micSize);
                         micRoot.transform.localRotation = Quaternion.Euler(0f, 180f, 0f);
                         SetNodeColor(micRend, hover ? Color.black : Color.white, 1f);
-                        SetArrowDrawInFront(micRend, hover);
+                        // Always draw after the translucent shell (rq 5100) — hover-only Overlay
+                        // left white (Transparent) Z-fighting on top of the bubble.
+                        SetMicDrawOverShell(micRend);
                     }
                 }
 
@@ -849,6 +857,19 @@ namespace ThreeOS
                 mat.SetInt("_ZWrite", 0);
                 mat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
             }
+        }
+
+        /// <summary>
+        /// Mic sits in front of its shell without Z-fighting. Shell mats use rq 5100.
+        /// </summary>
+        private static void SetMicDrawOverShell(Renderer rend)
+        {
+            if (rend == null)
+                return;
+            var mat = rend.material;
+            mat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
+            mat.SetInt("_ZWrite", 0);
+            mat.renderQueue = 5110;
         }
 
         private static Mesh EnsureSlotMesh()

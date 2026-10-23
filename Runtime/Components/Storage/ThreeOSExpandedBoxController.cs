@@ -275,7 +275,7 @@ namespace ThreeOS
                 boxRelPath = ResolveBoxRelativePath(boxId);
             }
 
-            CollectBoxFolderEntries(boxRelPath, out var files, out var dirs);
+            CollectBoxFolderEntries(boxId, boxRelPath, out var files, out var dirs);
 
             // Reuse existing workspace children under this box (inserts + prior expands).
             var existingByName = new Dictionary<string, ulong>(System.StringComparer.OrdinalIgnoreCase);
@@ -286,6 +286,11 @@ namespace ThreeOS
                     existingByName[item.Name] = id;
                 }
             }
+
+            var boxFsRoot = _host.ResolveFsRootForEntity(boxId, boxRelPath);
+            var boxLeaf = string.IsNullOrEmpty(boxFsRoot)
+                ? ThreeOSStorageController.DemoFolderName
+                : Path.GetFileName(boxFsRoot.TrimEnd('/', '\\'));
 
             foreach (var name in files)
             {
@@ -302,6 +307,9 @@ namespace ThreeOS
                     childIds = CollectChildIds(boxId);
                     return false;
                 }
+
+                if (!string.IsNullOrEmpty(boxFsRoot))
+                    _host.RetargetEntityMindPalace(id, boxId);
             }
 
             foreach (var name in dirs)
@@ -313,7 +321,7 @@ namespace ThreeOS
 
                 var rel = $"{boxRelPath}/{name}";
                 uint nestedCount = 0;
-                foreach (var root in _host.Fs.CandidateDemoRoots())
+                foreach (var root in _host.Fs.CandidateDemoRootsFor(boxLeaf))
                 {
                     if (string.IsNullOrEmpty(root))
                     {
@@ -337,6 +345,9 @@ namespace ThreeOS
                     childIds = CollectChildIds(boxId);
                     return false;
                 }
+
+                if (!string.IsNullOrEmpty(boxFsRoot))
+                    _host.RetargetEntityMindPalace(id, boxId);
             }
 
             childIds = CollectChildIds(boxId);
@@ -608,13 +619,53 @@ namespace ThreeOS
             return childIds;
         }
 
-        internal void CollectBoxFolderEntries(string boxRelPath, out List<string> files, out List<string> dirs)
+        internal void CollectBoxFolderEntries(string boxRelPath, out List<string> files, out List<string> dirs) =>
+            CollectBoxFolderEntries(0, boxRelPath, out files, out dirs);
+
+        /// <summary>
+        /// List files/dirs under <paramref name="boxRelPath"/> using the Mind Palace root for
+        /// <paramref name="boxId"/> (Demo1/2/3). Previously only scanned 3OS_Demo, so Demo3's
+        /// DemonProject always looked empty after a cross-palace paste.
+        /// </summary>
+        internal void CollectBoxFolderEntries(ulong boxId, string boxRelPath, out List<string> files,
+            out List<string> dirs)
         {
             var fileSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
             var dirSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
             var rel = (boxRelPath ?? string.Empty).Replace('/', Path.DirectorySeparatorChar)
                 .Replace('\\', Path.DirectorySeparatorChar);
-            foreach (var root in _host.Fs.CandidateDemoRoots())
+
+            var roots = new List<string>();
+            var mpRoot = boxId != 0 ? _host.ResolveFsRootForEntity(boxId, boxRelPath) : null;
+            if (!string.IsNullOrEmpty(mpRoot))
+            {
+                var leaf = Path.GetFileName(mpRoot.TrimEnd('/', '\\'));
+                foreach (var r in _host.Fs.CandidateDemoRootsFor(leaf))
+                {
+                    if (!string.IsNullOrEmpty(r) && !roots.Contains(r))
+                        roots.Add(r);
+                }
+            }
+
+            // Fallback: probe all three demo leaves (paste may have landed before mp map update).
+            if (roots.Count == 0)
+            {
+                foreach (var leaf in new[]
+                         {
+                             ThreeOSStorageController.DemoFolderName,
+                             ThreeOSStorageController.DemoFolderName2,
+                             ThreeOSStorageController.DemoFolderName3
+                         })
+                {
+                    foreach (var r in _host.Fs.CandidateDemoRootsFor(leaf))
+                    {
+                        if (!string.IsNullOrEmpty(r) && !roots.Contains(r))
+                            roots.Add(r);
+                    }
+                }
+            }
+
+            foreach (var root in roots)
             {
                 if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(rel))
                 {
@@ -629,12 +680,14 @@ namespace ThreeOS
 
                 foreach (var name in ThreeOSAndroidStorage.ListFileNames(folder))
                 {
-                    fileSet.Add(name);
+                    if (!string.IsNullOrEmpty(name) && !name.StartsWith("."))
+                        fileSet.Add(name);
                 }
 
                 foreach (var name in ThreeOSAndroidStorage.ListDirectoryNames(folder))
                 {
-                    dirSet.Add(name);
+                    if (!string.IsNullOrEmpty(name) && !name.StartsWith("."))
+                        dirSet.Add(name);
                 }
             }
 

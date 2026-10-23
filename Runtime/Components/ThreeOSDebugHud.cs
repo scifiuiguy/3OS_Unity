@@ -170,6 +170,8 @@ namespace ThreeOS
             if ((flags & (uint)InteractionIntentFlags.MindPalaceMenu) != 0) parts.Add("MindPalace");
             if ((flags & (uint)InteractionIntentFlags.ModeToggleArmed) != 0) parts.Add("ModeArm");
             if ((flags & (uint)InteractionIntentFlags.ModeTogglePulse) != 0) parts.Add("ModePulse");
+            if ((flags & (uint)InteractionIntentFlags.VoodooDismissAllPulse) != 0) parts.Add("DismissAll");
+            else if ((flags & (uint)InteractionIntentFlags.VoodooDismissPulse) != 0) parts.Add("Dismiss");
             if ((flags & (uint)InteractionIntentFlags.PrimaryHeld) != 0) parts.Add("P1");
             if ((flags & (uint)InteractionIntentFlags.SecondaryHeld) != 0) parts.Add("P2");
             return parts.Count > 0 ? string.Join("+", parts) : $"0x{flags:X}";

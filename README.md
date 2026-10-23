@@ -68,11 +68,11 @@ https://github.com/scifiuiguy/3OS_Unity.git
 
 ## 🛠 Quickstart Guide
 
-1. Open `3OS_Unity_Sample_Project` in **Unity 6** (`6000.0.60f1` or newer 6000.0.x).
+1. See the core 3OS repo for a sample project that already has this package installed: [3OS_Unity](https://github.com/scifiuiguy/3OS) Pull that repo via its Getting Started instructions. Then open `3OS_Unity_Sample_Project` in **Unity 6** (`6000.0.60f1` or newer 6000.0.x).
 2. Confirm the `file:../3OS_Unity` package resolves in Package Manager.
 3. Configure **Project Settings** → **XR Plug-in Management** → **OpenXR** (Meta Quest feature group for device builds).
 4. Open `Assets/Scenes/3OS_DemoScene` (host copy) or import the package sample **3OS Demo Scene**.
-5. Build & Run to Quest 2 when ready (Phase 0.0 gate: empty scene launches).
+5. Build & Run to Quest when ready (Phase 0.0 gate: empty scene launches).
 
 **Phase 0.1:** Drop `ThreeOSBridge` + `ThreeOSInputRouter` + `ThreeOSDebugHud` on a GameObject (sample host uses `3OS_Harness`). Plugins ship under `Plugins/Windows/3os_kernel.dll` and `Plugins/Android/lib3os_kernel.so` (+ `libc++_shared.so`). HUD should show version `0.1.0`, ABI `1`, and rising tick count.
 

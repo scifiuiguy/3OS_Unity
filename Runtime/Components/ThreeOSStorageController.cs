@@ -51,6 +51,12 @@ namespace ThreeOS
         private float _triggerDownTime;
         private bool _triggerDragActive;
         private bool _triggerGestureConsumed;
+        /// <summary>
+        /// After Voodoo Dismiss / Dismiss All, suppress empty-air deselect briefly. Dual secondary
+        /// often also bumps primary; portals are already gone so homePortal==0 would ClearSelection
+        /// and drop the far-field object the user meant to keep for MR carry / telekinesis.
+        /// </summary>
+        private float _dismissKeepSelectionUntil;
         private Vector3 _triggerDownCursorXr;
         private bool _triggerDownCursorValid;
         private int _selectHand = -1;
@@ -66,6 +72,9 @@ namespace ThreeOS
         private string _demoRoot2 = string.Empty;
         private string _demoRoot3 = string.Empty;
         private ThreeOSPose _layoutHeadPose;
+        /// <summary>Origin used for the last Mind Palace fixture load (spawn / layout).</summary>
+        private ThreeOSPose _palaceLayoutOrigin;
+        private bool _palaceLayoutOriginValid;
         private bool _waitingForAllFilesAccess;
         private string _selectionLabel = "none";
         private ulong _xHoverBoxId;
@@ -113,6 +122,20 @@ namespace ThreeOS
         public bool PalaceClusterAnimBusy => _palaceClusterAnimBusy;
         public bool PalacePendingScaleIn => _palacePendingScaleIn;
         public ulong MrPersistedSelectionId => _mrPersistedSelectionId;
+        public Vector3 MrPersistedWorldPos => _mrPersistedWorldPos;
+        public Quaternion MrPersistedWorldRot => _mrPersistedWorldRot;
+
+        /// <summary>
+        /// MR world pose is the source of truth while a selection is carried into the office.
+        /// Call whenever the live glyph moves so MR→VR restore does not jump to a stale VR pose.
+        /// </summary>
+        public void CaptureMrPersistedFromLive(Transform live)
+        {
+            if (live == null || _mrPersistedSelectionId == 0)
+                return;
+            _mrPersistedWorldPos = live.position;
+            _mrPersistedWorldRot = live.rotation;
+        }
 
         internal bool IsPalaceEntity(ulong entityId) =>
             entityId != 0 && _entityMindPalace.ContainsKey(entityId);
@@ -129,6 +152,9 @@ namespace ThreeOS
         bool _selectionMatsDirty = true;
         ulong _lastSelectionId = ulong.MaxValue;
         float _nextSafetyReconcileAt;
+        uint _lastVoodooPortalCount;
+        /// After a portal parks, near BBs bump-lerp (~0.22s) — follow ghost poses only then.
+        float _ghostFollowUntil = -1f;
 
         // Collaborator access
         internal ThreeOSBridge Bridge => _bridge;
@@ -144,6 +170,58 @@ namespace ThreeOS
         internal string StatusField { get => _status; set => _status = value; }
         internal string SelectionLabelField { get => _selectionLabel; set => _selectionLabel = value; }
         internal string DemoRoot2Field => _demoRoot2;
+        internal string DemoRoot3Field => _demoRoot3;
+
+        /// <summary>
+        /// Absolute demo-root folder for an entity (Mind Palace 1/2/3), falling back to
+        /// probing which root still contains <paramref name="relativePath"/>.
+        /// </summary>
+        internal string ResolveFsRootForEntity(ulong entityId, string relativePath)
+        {
+            if (_entityMindPalace.TryGetValue(entityId, out var mpId))
+            {
+                if (mpId == _mpLeftId && !string.IsNullOrEmpty(_demoRoot))
+                    return _demoRoot;
+                if (mpId == _mpRightId && !string.IsNullOrEmpty(_demoRoot2))
+                    return _demoRoot2;
+                if (mpId == _mpCenterId && !string.IsNullOrEmpty(_demoRoot3))
+                    return _demoRoot3;
+            }
+
+            return ResolveFsRootContaining(relativePath) ?? _demoRoot;
+        }
+
+        /// <summary>First of Demo1/2/3 (docs or persistent) that contains this relative path.</summary>
+        internal string ResolveFsRootContaining(string relativePath)
+        {
+            var rel = ThreeOSStorageWriteThrough.NormalizeDemoRelPublic(relativePath);
+            if (string.IsNullOrEmpty(rel))
+                return null;
+
+            foreach (var root in new[] { _demoRoot, _demoRoot2, _demoRoot3 })
+            {
+                if (string.IsNullOrEmpty(root))
+                    continue;
+                var full = CombineRootRel(root, rel);
+                if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(full) ||
+                    ThreeOSDemoRootBootstrap.FileLooksPresent(full))
+                    return root;
+            }
+
+            // Also probe Documents/persistent mirrors for each leaf.
+            foreach (var leaf in new[] { DemoFolderName, DemoFolderName2, DemoFolderName3 })
+            {
+                foreach (var root in _fs.CandidateDemoRootsFor(leaf))
+                {
+                    var full = CombineRootRel(root, rel);
+                    if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(full) ||
+                        ThreeOSDemoRootBootstrap.FileLooksPresent(full))
+                        return root;
+                }
+            }
+
+            return null;
+        }
         internal bool WaitingForAllFilesAccess { get => _waitingForAllFilesAccess; set => _waitingForAllFilesAccess = value; }
         internal bool InsertAnimBusy { get => _insertAnimBusy; set => _insertAnimBusy = value; }
         internal bool BoxAnimBusy { get => _boxAnimBusy; set => _boxAnimBusy = value; }
@@ -153,6 +231,11 @@ namespace ThreeOS
         internal float TriggerDownTime { get => _triggerDownTime; set => _triggerDownTime = value; }
         internal bool TriggerDragActive { get => _triggerDragActive; set => _triggerDragActive = value; }
         internal bool TriggerGestureConsumed { get => _triggerGestureConsumed; set => _triggerGestureConsumed = value; }
+        internal float DismissKeepSelectionUntil
+        {
+            get => _dismissKeepSelectionUntil;
+            set => _dismissKeepSelectionUntil = value;
+        }
         internal Vector3 TriggerDownCursorXr { get => _triggerDownCursorXr; set => _triggerDownCursorXr = value; }
         internal bool TriggerDownCursorValid { get => _triggerDownCursorValid; set => _triggerDownCursorValid = value; }
         internal int SelectHandField { get => _selectHand; set => _selectHand = value; }
@@ -170,6 +253,10 @@ namespace ThreeOS
             ThreeOSDemoRootBootstrap.FallbackPersistentDemoPath();
         public static string PreferredDocumentsDemoPath2() =>
             ThreeOSDemoRootBootstrap.DocumentsPath(DemoFolderName2);
+        public static string PreferredDocumentsDemoPath3() =>
+            ThreeOSDemoRootBootstrap.DocumentsPath(DemoFolderName3);
+        public static string DocumentsDemoPath(string folderLeaf) =>
+            ThreeOSDemoRootBootstrap.DocumentsPath(folderLeaf);
         public static string FallbackPersistentDemoPath2() =>
             ThreeOSDemoRootBootstrap.PersistentPath(DemoFolderName2);
 
@@ -177,6 +264,22 @@ namespace ThreeOS
         internal static string CombineRootRelPublic(string root, string rel) => CombineRootRel(root, rel);
 
         internal void MarkViewsDirty() => _viewsDirty = true;
+
+        /// <summary>
+        /// Drop Act I directory-name precache after a successful paste so any later remount
+        /// re-lists Documents instead of resurrecting pre-paste folder sets.
+        /// </summary>
+        internal void InvalidatePalaceNamePrecache()
+        {
+            _palaceNamesPrecached = false;
+            _precacheFiles1 = null;
+            _precacheDirs1 = null;
+            _precacheFiles2 = null;
+            _precacheDirs2 = null;
+            _precacheFiles3 = null;
+            _precacheDirs3 = null;
+            Debug.Log("[3OS] Palace name precache invalidated after paste");
+        }
         internal void MarkGhostsDirty() => _ghostsDirty = true;
         internal void MarkSelectionMatsDirty() => _selectionMatsDirty = true;
 
@@ -239,15 +342,19 @@ namespace ThreeOS
                 yield break;
             }
 
+            yield return null;
             yield return InstallPacks();
+            yield return null;
             yield return null;
             yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
                 DemoFolderName, DemoSeedPolicy.RequireContent, null,
                 r => _demoRoot = r, s => _status = s);
             yield return null;
+            yield return null;
             yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
                 DemoFolderName2, DemoSeedPolicy.SoftSeedMindPalaceMarker, _demoRoot,
                 r => _demoRoot2 = r, s => _status = s);
+            yield return null;
             yield return null;
             yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
                 DemoFolderName3, DemoSeedPolicy.SoftSeedMindPalaceMarker, _demoRoot,
@@ -404,11 +511,24 @@ namespace ThreeOS
                 _selectionMatsDirty = true;
             }
 
-            // Ghosts track portal/near-field motion; far views only during box/insert anims.
+            // Ghosts: event-driven only (drag / snap / portal open / explicit MarkGhostsDirty).
+            // Idle open portals must not resync every frame — that was the Quest FPS sink.
             var snapPending = _bridge.TryGetSnap(out var snap) && snap.pending != 0;
-            if (GhostDragging || snapPending || _bridge.VoodooPortalCount > 0)
+            var portalCount = _bridge.VoodooPortalCount;
+            if (portalCount != _lastVoodooPortalCount)
+            {
                 _ghostsDirty = true;
-            if (InsertAnimBusy || BoxAnimBusy || _animLockedIds.Count > 0)
+                // New/removed portal → cover near-BB bump-lerp while seats settle.
+                if (portalCount > _lastVoodooPortalCount)
+                    _ghostFollowUntil = Time.unscaledTime + 0.28f;
+                _lastVoodooPortalCount = portalCount;
+            }
+
+            if (GhostDragging || snapPending || Time.unscaledTime < _ghostFollowUntil)
+                _ghostsDirty = true;
+            // Box open/close and locked anims need per-frame pose sync. Paste FS write-through
+            // must NOT — that was a full SyncViewsFromKernel every frame for seconds (Quest spikes).
+            if (BoxAnimBusy || _animLockedIds.Count > 0)
                 _viewsDirty = true;
 
             if (_viewsDirty)
@@ -426,9 +546,11 @@ namespace ThreeOS
             }
 
             // Hover chrome only while something can be hovered.
+            // Always run portal dismiss sync when chrome exists — last portal dismiss
+            // drops count to 0 and must still tear down orphaned X / scissors.
             if (_expanded.ExpandedBoxes.Count > 0)
                 _dismiss.UpdateExpandedDismissAffordances();
-            if (_bridge.VoodooPortalCount > 0)
+            if (_bridge.VoodooPortalCount > 0 || _dismiss.PortalDismiss.Count > 0)
                 _dismiss.UpdatePortalDismissAffordances();
 
             if (_selectionMatsDirty)
@@ -458,11 +580,14 @@ namespace ThreeOS
         {
             var installed = 0;
             var installedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            // Spread glyph installs across frames — double-loading every pack was a cold-boot hitch.
+            // Spread glyph installs across frames — LoadAll + Install are the cold-boot hitch.
+            yield return null;
             var packs = Resources.LoadAll<TextAsset>("3OS/glyphs");
             Debug.Log($"[3OS] Resources.LoadAll(3OS/glyphs) → {packs?.Length ?? 0} TextAsset(s)");
+            yield return null;
             if (packs != null)
             {
+                var i = 0;
                 foreach (var pack in packs)
                 {
                     if (pack == null || pack.bytes == null || pack.bytes.Length == 0)
@@ -471,13 +596,17 @@ namespace ThreeOS
                     {
                         installed++;
                         installedNames.Add(pack.name);
-                        Debug.Log($"[3OS] installed glyph pack resource {pack.name} ({pack.bytes.Length} bytes)");
                     }
                     else
                         Debug.LogWarning($"[3OS] failed pack {pack.name}: {_bridge.LastError}");
+                    // Two frames between packs keeps Act I MR open smoother on Quest.
                     yield return null;
+                    if ((++i & 1) == 0)
+                        yield return null;
                 }
             }
+
+            Debug.Log($"[3OS] installed {installed} glyph pack resource(s)");
 
             // StreamingAssets fills gaps only (e.g. blender_mark if Resources missed it).
             foreach (var fileName in new[]
@@ -538,6 +667,8 @@ namespace ThreeOS
 
         private bool LoadDualMindPalaceFixture(ThreeOSPose origin)
         {
+            _palaceLayoutOrigin = origin;
+            _palaceLayoutOriginValid = true;
             _bridge.StorageClear();
             _bridge.MindPalaceClear();
             _palaceEntityIds.Clear();
@@ -723,6 +854,8 @@ namespace ThreeOS
 
         IEnumerator LoadDualMindPalaceFixtureRoutine(ThreeOSPose origin)
         {
+            _palaceLayoutOrigin = origin;
+            _palaceLayoutOriginValid = true;
             _bridge.StorageClear();
             _bridge.MindPalaceClear();
             _palaceEntityIds.Clear();
@@ -804,7 +937,7 @@ namespace ThreeOS
         IEnumerator PrecachePalaceDirectoryNamesRoutine()
         {
             // Plenty of Act I time — delay and spread so cold open stays smooth.
-            yield return new WaitForSecondsRealtime(2.5f);
+            yield return new WaitForSecondsRealtime(4.0f);
             yield return PrecacheOneRootRoutine(_demoRoot, files => _precacheFiles1 = files,
                 dirs => _precacheDirs1 = dirs);
             yield return new WaitForSecondsRealtime(0.35f);
@@ -1027,17 +1160,30 @@ namespace ThreeOS
             done?.Invoke(true);
         }
 
+        /// <summary>Post-paste / remount: rebuild glyphs a few per frame (avoids one-frame hitch).</summary>
+        internal IEnumerator RebuildViewsSpreadPublic(int viewsPerFrame = 4) =>
+            RebuildViewsSpreadRoutine(viewsPerFrame);
+
         IEnumerator RebuildViewsSpreadRoutine(int viewsPerFrame)
         {
             _expanded.TeardownAllExpandedBoxes(collapseKernel: true);
-            foreach (var kv in _glyphs.Views)
-                _glyphs.DestroyGlyphView(kv.Value);
+            yield return null;
+
+            // Destroy old glyphs in small batches — nuking everything in one frame was a spike.
+            var doomed = new List<ThreeOSGlyphView>(_glyphs.Views.Values);
             _glyphs.Views.Clear();
+            var per = Mathf.Max(1, viewsPerFrame);
+            for (var i = 0; i < doomed.Count; i++)
+            {
+                _glyphs.DestroyGlyphView(doomed[i]);
+                if ((i + 1) % per == 0)
+                    yield return null;
+            }
+
             _glyphs.ClearGhostViews();
             _dismiss.ClearPortalDismissUi();
             yield return null;
 
-            var per = Mathf.Max(1, viewsPerFrame);
             var made = 0;
             var count = _bridge.StorageItemCount();
             for (uint i = 0; i < count; i++)
@@ -1091,7 +1237,8 @@ namespace ThreeOS
             if (_mpCenterId != 0)
                 _bridge.LayoutMindPalace(_mpCenterId, _mpCenterAnchor);
 
-            // Re-link persisted selection to original Palace centroid; keep world pose (anim lock).
+            // Re-link persisted selection to original Palace centroid. MR world pose always
+            // wins over whatever palace-field pose was cached before the VR→MR dismiss.
             if (_mrPersistedSelectionId != 0)
             {
                 if (_mrPersistedOriginalMpId != 0)
@@ -1102,8 +1249,9 @@ namespace ThreeOS
                     selView.Root != null)
                 {
                     selView.Root.SetActive(true);
-                    selView.Root.transform.SetPositionAndRotation(_mrPersistedWorldPos,
-                        _mrPersistedWorldRot);
+                    // Live MR transform is authoritative — refresh cache from it; do not
+                    // overwrite with the dismiss-time VR snapshot.
+                    CaptureMrPersistedFromLive(selView.Root.transform);
                 }
             }
 
@@ -1121,6 +1269,8 @@ namespace ThreeOS
                 persistView.Root != null)
             {
                 persistRoot = persistView.Root;
+                // Snapshot MR pose before rebuild; live root stays at MR world position.
+                CaptureMrPersistedFromLive(persistRoot.transform);
                 persistRoot.transform.SetParent(null, true);
                 _glyphs.Views.Remove(_mrPersistedSelectionId);
             }
@@ -1139,6 +1289,8 @@ namespace ThreeOS
                 }
 
                 persistRoot.SetActive(true);
+                // Re-assert MR pose (klobbers any palace layout pose RebuildViews may have set
+                // on a duplicate). Anim-lock keeps SyncViews from writing the old VR anchor.
                 persistRoot.transform.SetPositionAndRotation(_mrPersistedWorldPos, _mrPersistedWorldRot);
                 _animLockedIds.Add(_mrPersistedSelectionId);
             }
@@ -1311,6 +1463,10 @@ namespace ThreeOS
         /// </summary>
         public IEnumerator DismissPalaceToMr(Transform mrAnchorSpawn)
         {
+            // Collapse X is a world-rooted GO (not parented under the box glyph). Tear it down
+            // before destroying box views or the X floats into MR after the parent dismisses.
+            _expanded?.TeardownAllExpandedBoxes(collapseKernel: true);
+
             ulong keepId = 0;
             if (_bridge != null && _bridge.TryGetSelection(out var sel) && sel != 0)
                 keepId = sel;
@@ -1336,6 +1492,10 @@ namespace ThreeOS
                 _mrPersistedOriginalMpId = 0;
             }
 
+            // Drop portals/ghosts first — open portals were leaking Palace near-field into MR.
+            DismissAllVoodooPortals();
+            _fs?.CancelPasteProgressUi();
+
             yield return AnimatePalaceClustersScale(1f, 0.001f, PalaceClusterScaleSeconds, keepId);
 
             for (var i = 0; i < _palaceEntityIds.Count; i++)
@@ -1348,8 +1508,143 @@ namespace ThreeOS
                     view.Root.SetActive(false);
             }
 
+            // Force EVERY non-persisted workspace item out of field — paste rollbacks can leave
+            // glb/blend glyphs in_field without palace-id tags, and they otherwise follow into MR.
+            var count = _bridge.StorageItemCount();
+            for (uint i = 0; i < count; i++)
+            {
+                if (!_bridge.TryGetWorkspaceItem(i, out var item))
+                    continue;
+                if (item.entityId == 0 || item.entityId == keepId)
+                    continue;
+                _bridge.StorageSetInField(item.entityId, false);
+                if (_glyphs.Views.TryGetValue(item.entityId, out var stray) && stray.Root != null)
+                    stray.Root.SetActive(false);
+            }
+
             _palaceSoftDismissed = true;
+            _palacePendingScaleIn = false;
+            EnsurePalaceSoftDismissedVisuals();
+            // Destroy every glyph except the MR carry — belt-and-suspenders vs multi-file leak.
+            var doomed = new List<ulong>();
+            foreach (var kv in _glyphs.Views)
+            {
+                if (kv.Key != keepId && kv.Key != _mrPersistedSelectionId)
+                    doomed.Add(kv.Key);
+            }
+
+            for (var i = 0; i < doomed.Count; i++)
+            {
+                var id = doomed[i];
+                if (_glyphs.Views.TryGetValue(id, out var view))
+                {
+                    _glyphs.DestroyGlyphView(view);
+                    _glyphs.Views.Remove(id);
+                }
+            }
+
             MarkStorageVisualsDirty();
+        }
+
+        public void CancelPasteProgressUi() => _fs?.CancelPasteProgressUi();
+
+        /// <summary>
+        /// Hide/destroy Palace glyphs while soft-dismissed in MR.
+        /// Does not dismiss live voodoo portals or clear ghosts — MR office still allows
+        /// far-field voodoo (DemonA near-BB ghost) after the wipe settles.
+        /// </summary>
+        public void EnsurePalaceSoftDismissedVisuals()
+        {
+            if (!_palaceSoftDismissed)
+                return;
+            _expanded?.TeardownAllExpandedBoxes(collapseKernel: true);
+            var remove = new List<ulong>();
+            foreach (var kv in _glyphs.Views)
+            {
+                if (kv.Key == _mrPersistedSelectionId)
+                    continue;
+                if (!IsPalaceEntity(kv.Key) && !_entityMindPalace.ContainsKey(kv.Key))
+                    continue;
+                remove.Add(kv.Key);
+            }
+
+            for (var i = 0; i < remove.Count; i++)
+            {
+                var id = remove[i];
+                if (_glyphs.Views.TryGetValue(id, out var view))
+                {
+                    _glyphs.DestroyGlyphView(view);
+                    _glyphs.Views.Remove(id);
+                }
+            }
+
+            _dismiss.ClearPortalDismissUi();
+        }
+
+        /// <summary>
+        /// After a remount while still in MR: keep disk/kernel fixture loaded but strip all
+        /// Unity glyphs so Act I reset does not flash Mind Palace into the office.
+        /// </summary>
+        void SoftDismissPalaceAfterRemount()
+        {
+            if (_bridge == null || !_bridge.IsLoaded)
+                return;
+
+            _expanded?.TeardownAllExpandedBoxes(collapseKernel: true);
+            DismissAllVoodooPortals();
+            _fs?.CancelPasteProgressUi();
+
+            var count = _bridge.StorageItemCount();
+            for (uint i = 0; i < count; i++)
+            {
+                if (!_bridge.TryGetWorkspaceItem(i, out var item) || item.entityId == 0)
+                    continue;
+                if (item.entityId == _mrPersistedSelectionId)
+                    continue;
+                _bridge.StorageSetInField(item.entityId, false);
+            }
+
+            var doomed = new List<ulong>(_glyphs.Views.Keys);
+            for (var i = 0; i < doomed.Count; i++)
+            {
+                var id = doomed[i];
+                if (id == _mrPersistedSelectionId)
+                    continue;
+                if (_glyphs.Views.TryGetValue(id, out var view))
+                {
+                    _glyphs.DestroyGlyphView(view);
+                    _glyphs.Views.Remove(id);
+                }
+            }
+
+            _palaceSoftDismissed = true;
+            _palacePendingScaleIn = false;
+            _glyphs.ClearGhostViews();
+            _dismiss.ClearPortalDismissUi();
+            MarkStorageVisualsDirty();
+            Debug.Log("[3OS] SoftDismissPalaceAfterRemount — palace fixture kept, glyphs hidden in MR");
+        }
+
+        void DismissAllVoodooPortals()
+        {
+            if (_bridge == null || !_bridge.IsLoaded)
+                return;
+            _bridge.VoodooCutCancel();
+            // Dismiss from the end — indices shift as portals close.
+            for (var guard = 0; guard < 32; guard++)
+            {
+                var n = _bridge.VoodooPortalCount;
+                if (n == 0)
+                    break;
+                if (!_bridge.TryGetVoodooPortal(n - 1, out var portal) || portal.id == 0)
+                    break;
+                if (!_bridge.DismissVoodooPortal(portal.id))
+                    break;
+            }
+
+            _glyphs.ClearGhostViews();
+            _dismiss.ClearPortalDismissUi();
+            _lastVoodooPortalCount = 0;
         }
 
         private bool LoadDemoDirectory(string root) =>
@@ -1529,6 +1824,156 @@ namespace ThreeOS
             }
 
             MarkStorageVisualsDirty();
+        }
+
+        /// <summary>
+        /// After a successful FS paste into <paramref name="boxId"/>, point the moved entity
+        /// at the destination Mind Palace (cross-cluster Demo1/2/3).
+        /// </summary>
+        internal void RetargetEntityMindPalace(ulong entityId, ulong boxId)
+        {
+            if (entityId == 0 || boxId == 0)
+                return;
+            if (!_entityMindPalace.TryGetValue(boxId, out var mp) || mp == 0)
+                return;
+            _bridge.SetMindPalaceRoot(entityId, mp);
+            _entityMindPalace[entityId] = mp;
+        }
+
+        /// <summary>
+        /// Debug (Act I reset): undo the last paste batch on disk and remount Mind Palace
+        /// from the restored folders. Returns false if nothing was recorded.
+        /// </summary>
+        public bool TryUndoLastPasteDebug()
+        {
+            if (_fs == null || !_fs.HasLastPasteBatch)
+                return false;
+            StartCoroutine(_fs.UndoLastPasteRoutine());
+            return true;
+        }
+
+        /// <summary>
+        /// Drop the MR-persisted selection glyph (e.g. DemonA.blend carried into MR) so Act I
+        /// reset can remount a clean palace. Does not rewrite disk paths.
+        /// </summary>
+        public void ClearMrPersistedSelectionVisual()
+        {
+            if (_mrPersistedSelectionId != 0)
+            {
+                var id = _mrPersistedSelectionId;
+                if (_glyphs.Views.TryGetValue(id, out var view))
+                {
+                    _glyphs.DestroyGlyphView(view);
+                    _glyphs.Views.Remove(id);
+                }
+
+                _animLockedIds.Remove(id);
+                if (_bridge != null && _bridge.IsLoaded)
+                {
+                    _bridge.StorageSetInField(id, false);
+                    _bridge.SetMindPalaceRoot(id, 0);
+                }
+            }
+
+            _mrPersistedSelectionId = 0;
+            _mrPersistedOriginalMpId = 0;
+        }
+
+        public void ClearLastPasteBatch() => _fs?.ClearLastPasteBatch();
+
+        /// <summary>
+        /// Public remount for Act I reset after offline snapshot restore.
+        /// When <paramref name="remainHiddenInMr"/> is true (user still in MR office), disk/kernel
+        /// remount runs but glyphs stay soft-dismissed so Mind Palace does not appear in MR.
+        /// </summary>
+        public IEnumerator RemountPalaceAfterDemoResetRoutine(bool remainHiddenInMr = false)
+        {
+            InvalidatePalaceNamePrecache();
+            var staySoft = remainHiddenInMr || _palaceSoftDismissed;
+            if (_palaceFixtureLoaded || staySoft)
+                yield return ForceReloadMindPalaceRoutine(remainSoftDismissed: staySoft);
+        }
+
+        /// <summary>
+        /// After a paste batch: re-scan dest box folders from the correct Demo1/2/3 root so
+        /// DemonProject (Demo3) is not stuck showing 0 children when disk actually filled.
+        /// </summary>
+        internal void RequestPostPasteChildHeal()
+        {
+            if (_fs == null || !_fs.HasLastPasteBatch || _bridge == null || !_bridge.IsLoaded)
+                return;
+
+            var destBoxIds = new HashSet<ulong>();
+            var count = _bridge.StorageItemCount();
+            for (uint i = 0; i < count; i++)
+            {
+                if (!_bridge.TryGetWorkspaceItem(i, out var item) || item.kind != 1)
+                    continue;
+                // Heal any open-capable box that looks like a paste target (has DemonProject name
+                // or lives under Demo3). Cheap name match covers the Final Demo path.
+                if (string.Equals(item.Name, "DemonProject", StringComparison.OrdinalIgnoreCase) ||
+                    (_entityMindPalace.TryGetValue(item.entityId, out var mp) && mp == _mpCenterId &&
+                     _mpCenterId != 0))
+                {
+                    destBoxIds.Add(item.entityId);
+                }
+            }
+
+            foreach (var boxId in destBoxIds)
+            {
+                var rel = _expanded.ResolveBoxRelativePath(boxId);
+                if (string.IsNullOrEmpty(rel))
+                    rel = "DemonProject";
+                if (_expanded.EnsureBoxChildren(boxId, rel, out var kids))
+                    Debug.Log($"[3OS] post-paste heal box={boxId} rel={rel} children={kids.Count}");
+            }
+
+            MarkViewsDirty();
+        }
+
+        /// <summary>
+        /// Re-scan Demo1/2/3 from disk into a fresh Mind Palace fixture (keeps prior layout origin).
+        /// Pass <paramref name="remainSoftDismissed"/> when remounting from MR so glyphs do not
+        /// flash into the office after the rebuild.
+        /// </summary>
+        internal IEnumerator ForceReloadMindPalaceRoutine(bool remainSoftDismissed = false)
+        {
+            if (_bridge == null || !_bridge.IsLoaded)
+            {
+                Debug.LogError("[3OS] ForceReload: bridge not loaded");
+                yield break;
+            }
+
+            // Capture before clearing — paste-undo remounts while soft-dismissed in MR too.
+            var staySoft = remainSoftDismissed || _palaceSoftDismissed;
+
+            var origin = _palaceLayoutOriginValid ? _palaceLayoutOrigin : _layoutHeadPose;
+            // Soft-dismiss / pending-scale flags must not block the remount load itself.
+            _palaceFixtureLoaded = false;
+            _palaceSoftDismissed = false;
+            _palacePendingScaleIn = false;
+            _bridge.VoodooCutCancel();
+            yield return LoadDualMindPalaceFixtureRoutine(origin);
+            if (!_palaceFixtureLoaded)
+            {
+                Debug.LogError($"[3OS] ForceReload failed: {_status}");
+                yield break;
+            }
+
+            yield return RebuildViewsSpreadRoutine(viewsPerFrame: 6);
+            MarkGhostsDirty();
+
+            if (staySoft)
+            {
+                SoftDismissPalaceAfterRemount();
+                _status = "palace remounted (soft-dismissed in MR)";
+                Debug.Log("[3OS] ForceReload Mind Palace complete (kept soft-dismissed)");
+            }
+            else
+            {
+                _status = "palace remounted from disk";
+                Debug.Log("[3OS] ForceReload Mind Palace complete");
+            }
         }
 
         private void OnDestroy()

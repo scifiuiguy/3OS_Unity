@@ -52,6 +52,23 @@ namespace ThreeOS
                 return false;
             }
 
+            // Cheap probes first — full List* on Quest Documents is a cold-boot hitch.
+            if (File.Exists(Path.Combine(root, "simple.glb")) ||
+                File.Exists(Path.Combine(root, "DemonA.blend")) ||
+                File.Exists(Path.Combine(root, "marker.txt")))
+            {
+                return true;
+            }
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (ThreeOSAndroidStorage.TryProbeFileName(root, "simple.glb") ||
+                ThreeOSAndroidStorage.TryProbeFileName(root, "DemonA.blend") ||
+                ThreeOSAndroidStorage.TryProbeFileName(root, "marker.txt"))
+            {
+                return true;
+            }
+#endif
+
             if (ThreeOSAndroidStorage.ListDirectoryNames(root).Count > 0)
             {
                 return true;
@@ -254,8 +271,11 @@ namespace ThreeOS
             try { Directory.CreateDirectory(docs); }
             catch (Exception ex) { Debug.LogWarning($"[3OS] Documents demo create failed: {ex.Message}"); }
 
+            yield return null;
             var docsPopulated = DemoRootLooksPopulated(docs);
+            yield return null;
             var persistentPopulated = DemoRootLooksPopulated(fallback);
+            yield return null;
 
             if (policy == DemoSeedPolicy.RequireContent)
             {
@@ -266,21 +286,46 @@ namespace ThreeOS
                 persistentPopulated = DemoRootLooksPopulated(fallback) ||
                                       FileLooksPresent(Path.Combine(fallback, "simple.glb")) ||
                                       FileLooksPresent(Path.Combine(fallback, "DemonA.blend"));
+                yield return null;
+            }
+            else
+            {
+                // Soft-seed Mind Palace markers: skip Documents list/mirror blast at cold open.
+                if (!docsPopulated && !persistentPopulated)
+                {
+                    // fall through to soft-seed below
+                }
+                else
+                {
+                    var softRoot = PickDemoRoot(docs, fallback, docsPopulated, persistentPopulated);
+                    if (string.IsNullOrEmpty(softRoot))
+                        softRoot = fallback;
+                    setRoot(softRoot);
+                    Debug.Log(
+                        $"[3OS] demo root({folderName}) = {softRoot} (soft, skipped mirror)");
+                    yield return null;
+                    yield break;
+                }
             }
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-            TryMirrorDemoTree(docs, fallback);
-            TryMirrorDemoTree(fallback, docs);
-            docsPopulated = DemoRootLooksPopulated(docs);
-            persistentPopulated = DemoRootLooksPopulated(fallback);
-            if (policy == DemoSeedPolicy.RequireContent &&
-                DemoRootLooksPopulated(docs) &&
-                ThreeOSAndroidStorage.ListFileNames(docs).Count == 0 &&
-                !ThreeOSAndroidStorage.TryProbeFileName(docs, "simple.glb") &&
-                !ThreeOSAndroidStorage.IsExternalStorageManager())
+            if (policy == DemoSeedPolicy.RequireContent)
             {
-                Debug.LogWarning(
-                    "[3OS] Documents has folders but no listable files — grant all-files access later if needed");
+                TryMirrorDemoTree(docs, fallback);
+                yield return null;
+                TryMirrorDemoTree(fallback, docs);
+                yield return null;
+                docsPopulated = DemoRootLooksPopulated(docs);
+                yield return null;
+                persistentPopulated = DemoRootLooksPopulated(fallback);
+                yield return null;
+                if (docsPopulated &&
+                    !ThreeOSAndroidStorage.TryProbeFileName(docs, "simple.glb") &&
+                    !ThreeOSAndroidStorage.IsExternalStorageManager())
+                {
+                    Debug.LogWarning(
+                        "[3OS] Documents has folders but no listable files — grant all-files access later if needed");
+                }
             }
 #else
             if (policy == DemoSeedPolicy.RequireContent)
@@ -288,11 +333,14 @@ namespace ThreeOS
                 var early = PickDemoRoot(docs, fallback, docsPopulated, persistentPopulated);
                 if (!string.IsNullOrEmpty(early))
                     TryMirrorDemoTree(early, early == docs ? fallback : docs);
+                yield return null;
             }
 #endif
 
             docsPopulated = DemoRootLooksPopulated(docs);
+            yield return null;
             persistentPopulated = DemoRootLooksPopulated(fallback);
+            yield return null;
             var root = PickDemoRoot(docs, fallback, docsPopulated, persistentPopulated);
             if (string.IsNullOrEmpty(root))
             {

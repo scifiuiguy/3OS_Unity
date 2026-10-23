@@ -96,7 +96,7 @@ namespace ThreeOS
             var live = new HashSet<ulong>();
             var enterRadius = ThreeOSStorageController.DismissXDiameterM * 0.5f;
             var exitRadius = enterRadius * 2.25f;
-            var cutPortal = _bridge.VoodooCutPortal;
+            // Multi-portal cut set: each portal checks is_armed independently.
 
             var haveL = _input.LastLeftCursor.active != 0;
             var haveR = _input.LastRightCursor.active != 0;
@@ -252,7 +252,7 @@ namespace ThreeOS
 
                     if (ui.ScissorsVisual != null)
                     {
-                        var armed = cutPortal == portal.id;
+                        var armed = _bridge.VoodooCutIsArmed(portal.id);
                         var scale = ui.ScissorsHovered || armed ? 2f : 1f;
                         ui.ScissorsVisual.localScale = Vector3.one * scale;
                     }
@@ -336,6 +336,8 @@ namespace ThreeOS
                 return false;
             }
 
+            // Cut is pointer-only (opacity duck). Force one ghost sync — no disk I/O.
+            _host.MarkGhostsDirty();
             _status = hand == 0 ? "cut armed (L)" : "cut armed (R)";
             return true;
         }
@@ -412,12 +414,22 @@ namespace ThreeOS
                 cursors[cursorCount++] = aimUnity.position;
             }
 
+            List<ulong> orphanBoxIds = null;
             foreach (var kv in _expandedBoxes)
             {
                 var ui = kv.Value;
                 if (ui.XRoot == null || !_views.TryGetValue(ui.BoxId, out var boxView) ||
                     boxView.Root == null)
                 {
+                    // Box glyph gone (e.g. VR→MR dismiss) but world-rooted X left behind.
+                    if (ui.XRoot != null)
+                    {
+                        UnityEngine.Object.Destroy(ui.XRoot);
+                        ui.XRoot = null;
+                    }
+
+                    orphanBoxIds ??= new List<ulong>();
+                    orphanBoxIds.Add(kv.Key);
                     continue;
                 }
 
@@ -454,6 +466,16 @@ namespace ThreeOS
                 if (ui.Hovered)
                 {
                     _xHoverBoxId = ui.BoxId;
+                }
+            }
+
+            if (orphanBoxIds != null)
+            {
+                for (var i = 0; i < orphanBoxIds.Count; i++)
+                {
+                    _expandedBoxes.Remove(orphanBoxIds[i]);
+                    if (_xHoverBoxId == orphanBoxIds[i])
+                        _xHoverBoxId = 0;
                 }
             }
         }

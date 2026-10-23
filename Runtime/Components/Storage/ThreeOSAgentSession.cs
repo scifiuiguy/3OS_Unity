@@ -19,6 +19,8 @@ namespace ThreeOS
 
         private static Action<float> _requestShrink;
         private static Action _requestPopIn;
+        private static float _lastSpeakNotifyUnscaled = -999f;
+        const float SpeakNotifyDebounceSec = 0.45f;
 
         internal static void Bind(Action<float> requestShrink, Action requestPopIn)
         {
@@ -28,6 +30,14 @@ namespace ThreeOS
 
         internal static void NotifySpeak()
         {
+            var now = Time.unscaledTime;
+            if (now - _lastSpeakNotifyUnscaled < SpeakNotifyDebounceSec)
+            {
+                Debug.Log("[3OS][7.3] SpeakSelected debounced");
+                return;
+            }
+
+            _lastSpeakNotifyUnscaled = now;
             SpeakSelected?.Invoke();
         }
 

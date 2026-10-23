@@ -308,6 +308,9 @@ namespace ThreeOS
         private static extern int threeos_voodoo_dismiss_portal(ulong portalId);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_voodoo_dismiss_gesture_result();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint threeos_voodoo_creation_allowed();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
@@ -346,6 +349,9 @@ namespace ThreeOS
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern ulong threeos_voodoo_cut_portal();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_voodoo_cut_is_armed(ulong portalId);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_voodoo_cut_paste_at(float x, float y, float z);
@@ -837,6 +843,10 @@ namespace ThreeOS
         public bool DismissVoodooPortal(ulong portalId) =>
             IsLoaded && NativeAbiVersion >= 6 && Call(() => threeos_voodoo_dismiss_portal(portalId));
 
+        /// <summary>0 none; 1 single-hand dismiss; 2 dismiss-all — last <c>threeos_tick</c>.</summary>
+        public uint VoodooDismissGestureResult =>
+            IsLoaded && NativeAbiVersion >= 6 ? threeos_voodoo_dismiss_gesture_result() : 0u;
+
         public bool PointInAnyNearBb(Vector3 openXrPoint) =>
             IsLoaded && NativeAbiVersion >= 6 &&
             threeos_voodoo_point_in_near_bb(openXrPoint.x, openXrPoint.y, openXrPoint.z) != 0;
@@ -894,6 +904,11 @@ namespace ThreeOS
 
         public ulong VoodooCutPortal =>
             IsLoaded && NativeAbiVersion >= 6 ? threeos_voodoo_cut_portal() : 0UL;
+
+        public bool VoodooCutIsArmed(ulong portalId) =>
+            IsLoaded && NativeAbiVersion >= 6 && threeos_voodoo_cut_is_armed(portalId) != 0;
+
+        public bool VoodooCutActive => VoodooCutPortal != 0UL;
 
         public bool VoodooCutPasteAt(Vector3 openXrPoint) =>
             IsLoaded && NativeAbiVersion >= 6 &&

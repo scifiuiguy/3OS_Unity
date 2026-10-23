@@ -182,6 +182,10 @@ namespace ThreeOS
                 return;
             }
 
+            // Soft-dismiss only hides Palace *real* glyphs (SyncViewsFromKernel). Voodoo near-BB
+            // ghosts must still sync in MR so a far-field DemonA (or any in-field object) appears
+            // when the user opens a volume in the office.
+
             var live = new HashSet<ulong>();
             var portals = _bridge.VoodooPortalCount;
             for (uint pi = 0; pi < portals; pi++)
@@ -333,7 +337,7 @@ namespace ThreeOS
                 return new Vector3(ThreeOSStorageController.GlyphSizeM * 1.05f, ThreeOSStorageController.GlyphSizeM * 0.85f, ThreeOSStorageController.GlyphSizeM * 1.05f);
             }
 
-            if (glyphId == "gltf_mark" || glyphId == "blender_mark")
+            if (glyphId == "gltf_mark" || glyphId == "blender_mark" || glyphId == "unreal_mark")
             {
                 // Slightly smaller mark so Object ≠ Box silhouette.
                 return Vector3.one * (ThreeOSStorageController.GlyphSizeM * 0.85f);
@@ -635,6 +639,12 @@ namespace ThreeOS
                 return new Color(0.91f, 0.49f, 0.08f, 0.7f);
             }
 
+            if (item.GlyphId == "unreal_mark")
+            {
+                // White Unreal mark — black was unreadable on dark Palace sky / office geo.
+                return new Color(1f, 1f, 1f, 0.75f);
+            }
+
             return new Color(
                 Mathf.Approximately(item.tintR, 1f) && Mathf.Approximately(item.tintG, 1f)
                     ? 0.75f
@@ -828,11 +838,33 @@ namespace ThreeOS
                 seen.Add(item.entityId);
                 var inField = (item.flags & 1u) != 0;
                 var animLocked = _animLockedIds.Contains(item.entityId);
+                var isPersistedMr = item.entityId != 0 &&
+                                    item.entityId == _host.MrPersistedSelectionId;
+
+                // Soft-dismissed in MR: never recreate Palace glyphs (fixes delayed MR leak).
+                if (_host.PalaceSoftDismissed && !isPersistedMr)
+                {
+                    if (_views.TryGetValue(item.entityId, out var softHide))
+                    {
+                        DestroyGlyphView(softHide);
+                        _views.Remove(item.entityId);
+                    }
+
+                    continue;
+                }
+
                 if (!inField)
                 {
+                    // Destroy (don't leave inactive) — large pastes used to leave dozens of
+                    // hidden glyphs alive, and full RebuildViews to clean them hung the Quest.
                     if (_views.TryGetValue(item.entityId, out var hide))
                     {
-                        if (hide.Root != null && !animLocked)
+                        if (!animLocked)
+                        {
+                            DestroyGlyphView(hide);
+                            _views.Remove(item.entityId);
+                        }
+                        else if (hide.Root != null)
                         {
                             hide.Root.SetActive(false);
                         }
@@ -857,12 +889,22 @@ namespace ThreeOS
                 }
 
                 view.Root.SetActive(true);
+                // MR-persisted selection: keep the MR world cache in sync with the live glyph so
+                // MR→VR restore klobbers any stale palace-field pose with the office anchor.
+                if (isPersistedMr)
+                    _host.CaptureMrPersistedFromLive(view.Root.transform);
+
                 // While kernel kinematics drives this entity (possess or coast), Movable owns pose.
                 // Overwriting from workspace here caused post-release snaps to a stale layout pose.
-                // Expand/collapse cluster tween also owns pose until the anim node is destroyed.
+                // Expand/collapse / MR-carry anim-lock also owns pose until cleared.
                 var kineticDriven = _host.IsKinematicallyDriven(item.entityId);
                 if (!kineticDriven && !animLocked)
                 {
+                    // Soft-dismissed MR carry: never write palace/workspace pose over the office
+                    // anchor — MR always takes precedence until the user telekinesis-moves it.
+                    if (isPersistedMr && _host.PalaceSoftDismissed)
+                        continue;
+
                     var pose = InteropStructs.ToUnityPose(item.pose);
                     view.Root.transform.SetPositionAndRotation(pose.position, pose.rotation);
                 }

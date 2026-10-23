@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
@@ -90,6 +91,114 @@ namespace ThreeOS
             return false;
         }
 
+        /// <summary>android.system.Os.rename — same-volume; no JNI CopyOption array quirks.</summary>
+        public static bool OsRename(string src, string dst)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(dst))
+                return false;
+            try
+            {
+                using var dstFile = new AndroidJavaObject("java.io.File", dst);
+                using var parent = dstFile.Call<AndroidJavaObject>("getParentFile");
+                parent?.Call<bool>("mkdirs");
+                using var os = new AndroidJavaClass("android.system.Os");
+                os.CallStatic("rename", src, dst);
+                if (Exists(dst))
+                {
+                    Debug.Log($"[3OS] Os.rename OK {src} → {dst}");
+                    return true;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[3OS] Os.rename: {ex.Message}");
+            }
+#endif
+            return false;
+        }
+
+        /// <summary>
+        /// Last-resort same as adb shell mv — proven to relocate Quest Documents folders when
+        /// Java NIO/renameTo fail from Unity JNI. Uses ProcessBuilder (Runtime.exec(String[])
+        /// often binds the wrong overload under IL2CPP).
+        /// </summary>
+        public static bool ShellMv(string src, string dst)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(dst))
+                return false;
+            try
+            {
+                using var dstFile = new AndroidJavaObject("java.io.File", dst);
+                using var parent = dstFile.Call<AndroidJavaObject>("getParentFile");
+                parent?.Call<bool>("mkdirs");
+
+                var quotedSrc = "'" + src.Replace("'", "'\\''") + "'";
+                var quotedDst = "'" + dst.Replace("'", "'\\''") + "'";
+                var script = "mv -f -- " + quotedSrc + " " + quotedDst;
+                using var list = new AndroidJavaObject("java.util.ArrayList");
+                list.Call<bool>("add", "/system/bin/sh");
+                list.Call<bool>("add", "-c");
+                list.Call<bool>("add", script);
+                using var pb = new AndroidJavaObject("java.lang.ProcessBuilder", list);
+                pb.Call<AndroidJavaObject>("redirectErrorStream", true);
+                using var proc = pb.Call<AndroidJavaObject>("start");
+                var exit = proc.Call<int>("waitFor");
+                if (exit == 0 && Exists(dst))
+                {
+                    Debug.Log($"[3OS] ShellMv OK {src} → {dst}");
+                    return true;
+                }
+
+                Debug.LogWarning($"[3OS] ShellMv exit={exit} {src} → {dst}");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[3OS] ShellMv: {ex.Message}");
+            }
+#endif
+            return false;
+        }
+
+        /// <summary>Append one line to persistent paste_fs.log (survives logcat clears).</summary>
+        public static void AppendPasteFsLog(string line)
+        {
+            try
+            {
+                var path = Path.Combine(Application.persistentDataPath, "paste_fs.log");
+                File.AppendAllText(path, DateTime.UtcNow.ToString("o") + " " + line + "\n");
+            }
+            catch
+            {
+                // never break paste on logging
+            }
+        }
+
+        /// <summary>
+        /// Run JNI / <see cref="AndroidJavaObject"/> work from a ThreadPool worker.
+        /// Quest Documents folder moves need NIO; doing that on the Unity main thread
+        /// stalls frames (~80–100ms per folder → ~20 fps during multi-folder paste).
+        /// </summary>
+        public static void RunWithJni(Action action)
+        {
+            if (action == null)
+                return;
+#if UNITY_ANDROID && !UNITY_EDITOR
+            AndroidJNI.AttachCurrentThread();
+            try
+            {
+                action();
+            }
+            finally
+            {
+                AndroidJNI.DetachCurrentThread();
+            }
+#else
+            action();
+#endif
+        }
+
         public static bool JavaDelete(string path)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -155,17 +264,89 @@ namespace ThreeOS
                 using var dstPath = paths.CallStatic<AndroidJavaObject>("get", dst, emptyMore);
                 using var optionCls = new AndroidJavaClass("java.nio.file.StandardCopyOption");
                 using var replace = optionCls.GetStatic<AndroidJavaObject>("REPLACE_EXISTING");
-                filesCls.CallStatic<AndroidJavaObject>("move", srcPath, dstPath, replace);
+                // JNI varargs: pass CopyOption[] explicitly.
+                var opts = new AndroidJavaObject[] { replace };
+                filesCls.CallStatic<AndroidJavaObject>("move", srcPath, dstPath, opts);
 
-                if (Exists(dst) && !Exists(src))
+                // MTP Documents often still lists src after a successful move. Dest present
+                // is enough — callers scrub the ghost. Requiring !Exists(src) made every
+                // folder paste report failure while Demo/Demo2 stayed put.
+                if (Exists(dst))
                 {
-                    Debug.Log($"[3OS] NIO move OK {src} → {dst}");
+                    Debug.Log($"[3OS] NIO move OK {src} → {dst} (srcGone={!Exists(src)})");
                     return true;
                 }
+
+                Debug.LogWarning($"[3OS] JavaNioMove returned but dest missing {src} → {dst}");
             }
             catch (System.Exception ex)
             {
                 Debug.LogWarning($"[3OS] JavaNioMove: {ex.Message}");
+            }
+#endif
+            return false;
+        }
+
+        /// <summary>
+        /// Recursive directory copy via java.io.File (main thread). Used when rename/move fails
+        /// on MTP-staged Documents folders.
+        /// </summary>
+        public static bool JavaCopyDirectory(string src, string dst)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(dst))
+                return false;
+            try
+            {
+                using var srcFile = new AndroidJavaObject("java.io.File", src);
+                if (!srcFile.Call<bool>("isDirectory"))
+                    return false;
+                using var dstFile = new AndroidJavaObject("java.io.File", dst);
+                if (!dstFile.Call<bool>("exists") && !dstFile.Call<bool>("mkdirs"))
+                    return false;
+
+                var children = srcFile.Call<AndroidJavaObject[]>("listFiles");
+                if (children == null)
+                    return true;
+
+                foreach (var child in children)
+                {
+                    if (child == null)
+                        continue;
+                    using (child)
+                    {
+                        var name = child.Call<string>("getName");
+                        if (string.IsNullOrEmpty(name) || name == "." || name == "..")
+                            continue;
+                        var childDst = Path.Combine(dst, name);
+                        if (child.Call<bool>("isDirectory"))
+                        {
+                            if (!JavaCopyDirectory(child.Call<string>("getAbsolutePath"), childDst))
+                                return false;
+                        }
+                        else
+                        {
+                            using var outFile = new AndroidJavaObject("java.io.File", childDst);
+                            using var filesCls = new AndroidJavaClass("java.nio.file.Files");
+                            using var paths = new AndroidJavaClass("java.nio.file.Paths");
+                            var emptyMore = new string[0];
+                            using var sp = paths.CallStatic<AndroidJavaObject>(
+                                "get", child.Call<string>("getAbsolutePath"), emptyMore);
+                            using var dp = paths.CallStatic<AndroidJavaObject>("get", childDst, emptyMore);
+                            using var optionCls = new AndroidJavaClass("java.nio.file.StandardCopyOption");
+                            using var replace = optionCls.GetStatic<AndroidJavaObject>("REPLACE_EXISTING");
+                            var opts = new AndroidJavaObject[] { replace };
+                            filesCls.CallStatic<AndroidJavaObject>("copy", sp, dp, opts);
+                        }
+                    }
+                }
+
+                Debug.Log($"[3OS] JavaCopyDirectory OK {src} → {dst}");
+                return Exists(dst);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[3OS] JavaCopyDirectory: {ex.Message}");
             }
 #endif
             return false;
@@ -325,7 +506,8 @@ namespace ThreeOS
                 // fall through
             }
 #endif
-            return File.Exists(path);
+            // File.Exists is false for directories — always pair with Directory.Exists.
+            return File.Exists(path) || Directory.Exists(path);
         }
 
         /// <summary>

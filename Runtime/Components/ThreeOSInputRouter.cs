@@ -35,6 +35,13 @@ namespace ThreeOS
         private Material _rightCursorMat;
         private ulong _frameIndex;
 
+        // Suppress pinch/buttons briefly after a hand reacquires tracking (false positives).
+        const float TrackingEngagePadSec = 0.35f;
+        float _leftEngageAt = -1f;
+        float _rightEngageAt = -1f;
+        bool _leftWasTracked;
+        bool _rightWasTracked;
+
 #if THREEOS_XR_HANDS
         private XRHandSubsystem _hands;
 #endif
@@ -156,6 +163,13 @@ namespace ThreeOS
                 // Hands win for aim/trigger when tracked (controllers often still report).
                 ApplyHandToFrame(ref frame, leftHand, isLeft: true);
                 ApplyHandToFrame(ref frame, rightHand, isLeft: false);
+                ApplyTrackingEngagePad(ref frame, ref leftHand, ref rightHand,
+                    leftHand.tracked != 0, rightHand.tracked != 0);
+            }
+            else
+            {
+                _leftWasTracked = false;
+                _rightWasTracked = false;
             }
 
             // While storage telekinesis is active, mute the other hand so kernel
@@ -308,18 +322,11 @@ namespace ThreeOS
                 return false;
             }
 
-            var any = false;
-            if (FillOneHand(_hands.leftHand, ref left))
-            {
-                any = true;
-            }
-
-            if (FillOneHand(_hands.rightHand, ref right))
-            {
-                any = true;
-            }
-
-            return any;
+            // Always report the hand subsystem when present — even if both palms are
+            // untracked — so Tick does not synth controller-aim hands (cursors near face).
+            FillOneHand(_hands.leftHand, ref left);
+            FillOneHand(_hands.rightHand, ref right);
+            return true;
         }
 
         private bool FillOneHand(XRHand hand, ref InteropHandSample sample)
@@ -446,27 +453,15 @@ namespace ThreeOS
                 return;
             }
 
-            ThreeOSVec3 openXrPos;
-            float scale = 1f;
-            if (cursor.active != 0)
+            // Hide on tracking loss — aim/controller fallback parked tips near the face.
+            if (cursor.active == 0)
             {
-                openXrPos = cursor.position;
-                scale = Mathf.Max(0.1f, cursor.scale);
-            }
-            else
-            {
-                // Fallback: controller/hand aim when kernel cursor is inactive so MR
-                // Act I still shows an aim tip (hand meshes may lag or be absent).
-                var aimFlag = isLeft ? TrackingFlags.LeftAim : TrackingFlags.RightAim;
-                if ((frame.trackingFlags & (uint)aimFlag) == 0)
-                {
-                    SetActive(tip, false);
-                    return;
-                }
-
-                openXrPos = isLeft ? frame.leftAim.position : frame.rightAim.position;
+                SetActive(tip, false);
+                return;
             }
 
+            var openXrPos = cursor.position;
+            var scale = Mathf.Max(0.1f, cursor.scale);
             var openXr = openXrPos.ToVector3();
             tip.position = InteropStructs.OpenXrToUnityPosition(openXr);
             tip.localScale = Vector3.one * (CursorBaseDiameterM * scale);
@@ -480,6 +475,56 @@ namespace ThreeOS
             }
 
             SetActive(tip, true);
+        }
+
+        static bool HandAnyPressed(in InteropHandSample hand) =>
+            hand.primaryPressed != 0 || hand.secondaryPressed != 0 || hand.ternaryPressed != 0;
+
+        void ApplyTrackingEngagePad(ref InteropInputFrame frame,
+            ref InteropHandSample leftHand, ref InteropHandSample rightHand,
+            bool leftTracked, bool rightTracked)
+        {
+            var now = Time.unscaledTime;
+            if (leftTracked && !_leftWasTracked)
+                _leftEngageAt = now + TrackingEngagePadSec;
+            if (rightTracked && !_rightWasTracked)
+                _rightEngageAt = now + TrackingEngagePadSec;
+            if (!leftTracked)
+                _leftEngageAt = -1f;
+            if (!rightTracked)
+                _rightEngageAt = -1f;
+            _leftWasTracked = leftTracked;
+            _rightWasTracked = rightTracked;
+
+            // Mute through the pad, then keep muting until pinch releases so the first
+            // unmuted frame is not a rising edge (WasDown/prev stayed false during mute).
+            if (_leftEngageAt > 0f)
+            {
+                var stillHeld = HandAnyPressed(leftHand);
+                if (now < _leftEngageAt || stillHeld)
+                {
+                    MuteHandSample(ref leftHand);
+                    frame.leftTrigger = 0f;
+                    frame.buttonFlags &= ~(uint)(ButtonFlags.LeftSelect | ButtonFlags.LeftGrab |
+                                                 ButtonFlags.LeftTernary);
+                }
+                else
+                    _leftEngageAt = -1f;
+            }
+
+            if (_rightEngageAt > 0f)
+            {
+                var stillHeld = HandAnyPressed(rightHand);
+                if (now < _rightEngageAt || stillHeld)
+                {
+                    MuteHandSample(ref rightHand);
+                    frame.rightTrigger = 0f;
+                    frame.buttonFlags &= ~(uint)(ButtonFlags.RightSelect | ButtonFlags.RightGrab |
+                                                ButtonFlags.RightTernary);
+                }
+                else
+                    _rightEngageAt = -1f;
+            }
         }
 
         private static void SetActive(Transform tip, bool active)
