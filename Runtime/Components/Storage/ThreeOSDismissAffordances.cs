@@ -13,6 +13,16 @@ namespace ThreeOS
         private readonly ulong[] _xHoverPortalHand = new ulong[2];
         private readonly ulong[] _scissorsHoverPortalHand = new ulong[2];
         private static Mesh _scissorsGlyphMesh;
+        private sealed class GhostDismissX
+        {
+            public GameObject Root;
+            public Transform Visual;
+            public bool Hovered;
+        }
+
+        private readonly Dictionary<ulong, GhostDismissX> _ghostDismissX = new Dictionary<ulong, GhostDismissX>();
+        private readonly HashSet<ulong> _ghostXLive = new HashSet<ulong>();
+        private readonly List<ulong> _ghostXStale = new List<ulong>();
         private static bool _scissorsGlyphMeshAttempted;
 
         internal ThreeOSDismissAffordances(ThreeOSStorageController host) { _host = host; }
@@ -383,11 +393,107 @@ namespace ThreeOS
             _scissorsHoverPortalHand[0] = 0;
             _scissorsHoverPortalHand[1] = 0;
         }
+        internal bool HasGhostDismissX => _ghostDismissX.Count > 0;
+
+        /// <summary>
+        /// Near-BB (voodoo ghost) copies of an expanded box get their own X so the dismiss
+        /// control is visible and usable from the near volume, not only on the far-field box.
+        /// </summary>
+        private void SyncGhostBoxDismissX(Vector3[] cursors, int cursorCount, float enterRadius, float exitRadius)
+        {
+            var ghosts = _host.Glyphs.GhostViews;
+            var cam = Camera.main;
+            _ghostXLive.Clear();
+            if (_expandedBoxes.Count > 0)
+            {
+                foreach (var kv in ghosts)
+                {
+                    var view = kv.Value;
+                    if (view == null || view.Root == null || !_expandedBoxes.ContainsKey(view.EntityId))
+                    {
+                        continue;
+                    }
+
+                    _ghostXLive.Add(kv.Key);
+                    if (!_ghostDismissX.TryGetValue(kv.Key, out var gx) || gx.Root == null)
+                    {
+                        var root = CreateDismissX(view.Root.transform.position);
+                        root.name = $"3OS_GhostBoxDismissX_{view.EntityId}";
+                        var visual = root.transform.Find("XVisual");
+                        gx = new GhostDismissX { Root = root, Visual = visual != null ? visual : root.transform };
+                        _ghostDismissX[kv.Key] = gx;
+                    }
+
+                    var scale = view.Root.transform.localScale.x;
+                    var xPos = view.Root.transform.position + view.Root.transform.up * (BoxDismissXOffsetM * scale);
+                    gx.Root.transform.position = xPos;
+                    gx.Root.transform.localScale = Vector3.one * scale;
+                    if (cam != null)
+                    {
+                        gx.Root.transform.rotation =
+                            Quaternion.LookRotation((cam.transform.position - xPos).normalized, Vector3.up);
+                    }
+
+                    var dist = float.MaxValue;
+                    for (var i = 0; i < cursorCount; i++)
+                    {
+                        dist = Mathf.Min(dist, Vector3.Distance(cursors[i], xPos));
+                    }
+
+                    gx.Hovered = dist <= (gx.Hovered ? exitRadius : enterRadius) * scale;
+                    gx.Visual.localScale = gx.Hovered ? Vector3.one * 2f : Vector3.one;
+                    if (gx.Hovered)
+                    {
+                        _xHoverBoxId = view.EntityId;
+                    }
+                }
+            }
+
+            if (_ghostDismissX.Count == _ghostXLive.Count)
+            {
+                return;
+            }
+
+            _ghostXStale.Clear();
+            foreach (var kv in _ghostDismissX)
+            {
+                if (!_ghostXLive.Contains(kv.Key))
+                {
+                    _ghostXStale.Add(kv.Key);
+                }
+            }
+
+            foreach (var key in _ghostXStale)
+            {
+                if (_ghostDismissX[key].Root != null)
+                {
+                    Destroy(_ghostDismissX[key].Root);
+                }
+
+                _ghostDismissX.Remove(key);
+            }
+        }
+
+        internal void ClearGhostDismissX()
+        {
+            foreach (var kv in _ghostDismissX)
+            {
+                if (kv.Value.Root != null)
+                {
+                    Destroy(kv.Value.Root);
+                }
+            }
+
+            _ghostDismissX.Clear();
+        }
+
         internal void UpdateExpandedDismissAffordances()
         {
             _xHoverBoxId = 0;
             if (_expandedBoxes.Count == 0 || _input == null)
             {
+                if (_ghostDismissX.Count > 0)
+                    ClearGhostDismissX();
                 return;
             }
 
@@ -468,6 +574,8 @@ namespace ThreeOS
                     _xHoverBoxId = ui.BoxId;
                 }
             }
+
+            SyncGhostBoxDismissX(cursors, cursorCount, enterRadius, exitRadius);
 
             if (orphanBoxIds != null)
             {

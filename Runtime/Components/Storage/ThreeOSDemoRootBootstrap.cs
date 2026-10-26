@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.IO;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -300,6 +301,8 @@ namespace ThreeOS
                     var softRoot = PickDemoRoot(docs, fallback, docsPopulated, persistentPopulated);
                     if (string.IsNullOrEmpty(softRoot))
                         softRoot = fallback;
+                    else if (!docsPopulated && DirectoryLooksPresent(docs))
+                        softRoot = docs;
                     setRoot(softRoot);
                     Debug.Log(
                         $"[3OS] demo root({folderName}) = {softRoot} (soft, skipped mirror)");
@@ -311,10 +314,15 @@ namespace ThreeOS
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (policy == DemoSeedPolicy.RequireContent)
             {
-                TryMirrorDemoTree(docs, fallback);
-                yield return null;
-                TryMirrorDemoTree(fallback, docs);
-                yield return null;
+                var mirror = Task.Run(() => ThreeOSAndroidStorage.RunWithJni(() =>
+                {
+                    TryMirrorDemoTree(docs, fallback);
+                    TryMirrorDemoTree(fallback, docs);
+                }));
+                while (!mirror.IsCompleted)
+                    yield return null;
+                if (mirror.IsFaulted)
+                    Debug.LogWarning($"[3OS] demo root mirror failed: {mirror.Exception?.GetBaseException().Message}");
                 docsPopulated = DemoRootLooksPopulated(docs);
                 yield return null;
                 persistentPopulated = DemoRootLooksPopulated(fallback);
@@ -351,7 +359,9 @@ namespace ThreeOS
                     setRoot(string.Empty);
                     yield break;
                 }
-                root = fallback;
+                // Documents is canonical: an emptied Documents root must stay mounted so a later
+                // reset/restore (which writes there) is visible, instead of shadowing it with persistent.
+                root = DirectoryLooksPresent(docs) ? docs : fallback;
                 try
                 {
                     var dest = Path.Combine(root, "simple.glb");

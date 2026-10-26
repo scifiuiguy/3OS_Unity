@@ -49,6 +49,14 @@ namespace ThreeOS
                     continue;
                 }
 
+                // Focus anchors (NPC head) must not draw — when the NPC floor scales to
+                // zero the head pose collapses to the floor and left a cyan blob in MR.
+                if (c.kind == (uint)CentroidKind.FocusAnchor)
+                {
+                    _markers[i].gameObject.SetActive(false);
+                    continue;
+                }
+
                 var t = _markers[i];
                 t.position = InteropStructs.OpenXrToUnityPosition(c.position.ToVector3());
                 t.localScale = Vector3.one * (0.08f / 3f);

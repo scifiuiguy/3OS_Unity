@@ -88,6 +88,7 @@ namespace ThreeOS
 
         /// <summary>Last successful paste batch (multi-item paste = one batch). Debug undo only.</summary>
         readonly List<PasteUndoEntry> _lastPasteBatch = new List<PasteUndoEntry>(8);
+        readonly HashSet<ulong> _lastPasteDestBoxIds = new HashSet<ulong>();
         readonly Queue<PendingFsCut> _pendingFsCuts = new Queue<PendingFsCut>(64);
         readonly object _pendingFsLock = new object();
         ThreeOSPasteProgressBar _pasteBar;
@@ -108,8 +109,13 @@ namespace ThreeOS
         }
 
         internal bool HasLastPasteBatch => _lastPasteBatch.Count > 0;
+        internal IReadOnlyCollection<ulong> LastPasteDestBoxIds => _lastPasteDestBoxIds;
 
-        internal void ClearLastPasteBatch() => _lastPasteBatch.Clear();
+        internal void ClearLastPasteBatch()
+        {
+            _lastPasteBatch.Clear();
+            _lastPasteDestBoxIds.Clear();
+        }
 
         internal IEnumerator InsertSequence(InteropStorageEvent ev, bool isContinuation = false)
         {
@@ -129,6 +135,7 @@ namespace ThreeOS
                 {
                     // New paste session replaces the previous undo snapshot.
                     _lastPasteBatch.Clear();
+                    _lastPasteDestBoxIds.Clear();
                     lock (_pendingFsLock)
                     {
                         _pendingFsCuts.Clear();
@@ -209,6 +216,8 @@ namespace ThreeOS
                         DestRel = destRel,
                         IsFolder = sourceIsBox,
                     });
+                    if (ev.boxId != 0)
+                        _lastPasteDestBoxIds.Add(ev.boxId);
                     _host.RetargetEntityMindPalace(ev.objectId, ev.boxId);
 
                     lock (_pendingFsLock)
@@ -252,16 +261,26 @@ namespace ThreeOS
                     yield return DrainPendingFsCutsRoutine();
                     _pasteBar?.SetProgress(1f);
                     yield return null;
+                    // Hide bar before heal/sync — Documents listing was the 100% FPS spike.
+                    _pasteBar?.Hide();
+                    // Give Meta Start a few clean frames before any Documents JNI / SyncViews.
+                    yield return null;
+                    yield return null;
+                    yield return null;
                     if (_lastPasteBatch.Count > 0)
                     {
                         _host.InvalidatePalaceNamePrecache();
-                        _host.RequestPostPasteChildHeal();
+                        // Spread heal across frames so the bar-complete frame stays light.
+                        yield return _host.RequestPostPasteChildHealRoutine();
                     }
 
-                    _host.MarkViewsDirty();
-                    _host.MarkGhostsDirty();
+                    // Heal adds inField=false kids; defer dirty so SyncViews is not same-frame as heal.
                     yield return null;
-                    _pasteBar?.Hide();
+                    yield return null;
+                    _host.MarkViewsDirty();
+                    if (_host.HasVoodooPortals)
+                        _host.MarkGhostsDirty();
+                    _host.SuppressSafetyReconcileFor(0.6f);
                 }
             }
             finally
@@ -983,7 +1002,8 @@ namespace ThreeOS
         }
 
         /// <summary>
-        /// Dest present = success. If MTP still lists src, scrub it; do not roll back dest.
+        /// Dest present = success only after src is gone (or was already the dest).
+        /// Prior path reported ok while Demo still held TestS after copy into DemonProject.
         /// </summary>
         bool FolderDestLanded(string src, string dst)
         {
@@ -991,9 +1011,22 @@ namespace ThreeOS
                 !ThreeOSAndroidStorage.Exists(dst))
                 return false;
 
+            if (string.Equals(src, dst, System.StringComparison.OrdinalIgnoreCase))
+                return true;
+
             if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(src) ||
                 ThreeOSAndroidStorage.Exists(src))
+            {
                 TryRemoveDirectoryBestEffort(src);
+                if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(src) ||
+                    ThreeOSAndroidStorage.Exists(src))
+                {
+                    Debug.LogWarning(
+                        $"[3OS] folder cut dest OK but src remains {src} → {dst}");
+                    ThreeOSAndroidStorage.AppendPasteFsLog($"src remains {src}");
+                    return false;
+                }
+            }
 
             return true;
         }
@@ -1108,17 +1141,29 @@ namespace ThreeOS
 
         static void TryRemoveDirectoryBestEffort(string path)
         {
-            if (string.IsNullOrEmpty(path) ||
-                !ThreeOSDemoRootBootstrap.DirectoryLooksPresent(path))
+            if (string.IsNullOrEmpty(path))
+                return;
+            if (!ThreeOSDemoRootBootstrap.DirectoryLooksPresent(path) &&
+                !ThreeOSAndroidStorage.Exists(path))
+                return;
+
+            // Shell rm -rf first — same Documents MTP path that leaves ENOTEMPTY for
+            // java.io.File.delete after copy+delete (TestS / DemonA paste leftovers).
+            if (ThreeOSAndroidStorage.ShellRm(path))
+                return;
+
+            ThreeOSAndroidStorage.JavaDeleteRecursive(path);
+            if (!ThreeOSDemoRootBootstrap.DirectoryLooksPresent(path) &&
+                !ThreeOSAndroidStorage.Exists(path))
                 return;
 
             try { Directory.Delete(path, true); }
-            catch { /* fall through to Java */ }
+            catch { /* fall through */ }
 
-            if (!ThreeOSDemoRootBootstrap.DirectoryLooksPresent(path))
+            if (!ThreeOSDemoRootBootstrap.DirectoryLooksPresent(path) &&
+                !ThreeOSAndroidStorage.Exists(path))
                 return;
 
-            // Recursive Java delete for MTP leftovers System.IO cannot unlink.
             try
             {
                 foreach (var file in Directory.GetFiles(path))
@@ -1130,6 +1175,7 @@ namespace ThreeOS
 
             ThreeOSAndroidStorage.JavaDelete(path);
             try { Directory.Delete(path, true); } catch { /* best-effort */ }
+            ThreeOSAndroidStorage.ShellRm(path);
         }
 
         bool TryCutRelFileCross(string srcRoot, string sourceRel, string dstRoot, string destRel, byte[] data)
@@ -1631,6 +1677,11 @@ namespace ThreeOS
                 return true;
             }
 
+            // Documents MTP often denies File.Delete / java delete for staged files
+            // (simple.glb Access denied) — shell rm matches paste's working ShellMv path.
+            if (ThreeOSAndroidStorage.ShellRm(path))
+                return true;
+
             if (ThreeOSAndroidStorage.JavaDelete(path))
             {
                 return true;
@@ -1662,6 +1713,7 @@ namespace ThreeOS
                 File.SetAttributes(path, FileAttributes.Normal);
                 File.Delete(path);
                 ThreeOSAndroidStorage.JavaDelete(path);
+                ThreeOSAndroidStorage.ShellRm(path);
                 var gone = !ThreeOSAndroidStorage.Exists(path) && !File.Exists(path);
                 Debug.Log(gone
                     ? $"[3OS] deleted root copy (truncate) {path}"
@@ -1671,6 +1723,7 @@ namespace ThreeOS
             catch (System.Exception ex)
             {
                 Debug.LogWarning($"[3OS] truncate-delete {path}: {ex.Message}");
+                ThreeOSAndroidStorage.ShellRm(path);
                 return !ThreeOSAndroidStorage.Exists(path) && !File.Exists(path);
             }
         }

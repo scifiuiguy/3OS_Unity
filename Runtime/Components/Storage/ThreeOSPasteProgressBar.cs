@@ -5,7 +5,7 @@ namespace ThreeOS
 {
     /// <summary>
     /// Wide track + left-anchored green fill for Mind Palace paste / FS write-through.
-    /// Fill is inset to ~90% of track height/depth and grows in X from the left.
+    /// World-anchored above the destination box (3D); billboards toward the camera.
     /// </summary>
     internal sealed class ThreeOSPasteProgressBar
     {
@@ -19,6 +19,9 @@ namespace ThreeOS
         readonly Material _trackMat;
         readonly Material _fillMat;
         bool _visible;
+        bool _followCamera;
+        Transform _worldAnchor;
+        Vector3 _worldOffset;
 
         ThreeOSPasteProgressBar(Transform root, Transform fill, Material trackMat, Material fillMat)
         {
@@ -43,7 +46,6 @@ namespace ThreeOS
             track.localPosition = Vector3.zero;
 
             var fill = MakeCube(root, "Fill", fillMat);
-            // Start empty at left inner edge.
             ApplyFillScale(fill, 0f);
 
             rootGo.SetActive(false);
@@ -51,7 +53,7 @@ namespace ThreeOS
         }
 
         /// <summary>
-        /// Place in front of the camera (above Palace sky Overlay queue) so the bar stays visible.
+        /// Camera-locked fallback when no destination box transform is available.
         /// </summary>
         internal void ShowInFrontOfCamera(Camera cam, float distance = 0.85f, float up = -0.08f)
         {
@@ -59,6 +61,8 @@ namespace ThreeOS
                 return;
             if (cam == null)
                 cam = Camera.main;
+            _followCamera = true;
+            _worldAnchor = null;
             _root.SetParent(null, false);
             if (cam != null)
             {
@@ -73,29 +77,27 @@ namespace ThreeOS
             _visible = true;
         }
 
+        /// <summary>
+        /// Float above the paste destination box in world space (3D), billboarded to the HMD.
+        /// </summary>
         internal void ShowAt(Transform anchor, Vector3 worldOffset)
         {
-            // Prefer camera-locked placement — world anchors sit under the Palace sky Overlay.
-            var cam = Camera.main;
-            if (cam != null)
-            {
-                ShowInFrontOfCamera(cam);
-                return;
-            }
-
             if (_root == null)
                 return;
-            _root.SetParent(null, false);
-            if (anchor != null)
+
+            if (anchor == null)
             {
-                _root.position = anchor.position + worldOffset;
-                _root.rotation = Quaternion.LookRotation(
-                    Vector3.ProjectOnPlane(anchor.forward, Vector3.up).normalized.sqrMagnitude > 1e-6f
-                        ? Vector3.ProjectOnPlane(anchor.forward, Vector3.up).normalized
-                        : Vector3.forward,
-                    Vector3.up);
+                var cam = Camera.main;
+                if (cam != null)
+                    ShowInFrontOfCamera(cam);
+                return;
             }
 
+            _followCamera = false;
+            _worldAnchor = anchor;
+            _worldOffset = worldOffset;
+            _root.SetParent(null, false);
+            ApplyWorldPlacement();
             ApplyFillScale(_fill, 0f);
             if (!_root.gameObject.activeSelf)
                 _root.gameObject.SetActive(true);
@@ -106,12 +108,41 @@ namespace ThreeOS
         {
             if (!_visible || _root == null || !_root.gameObject.activeSelf)
                 return;
-            var cam = Camera.main;
-            if (cam == null)
+            if (_followCamera)
+            {
+                var cam = Camera.main;
+                if (cam == null)
+                    return;
+                _root.position = cam.transform.position + cam.transform.forward * 0.85f +
+                                 cam.transform.up * -0.08f;
+                _root.rotation = Quaternion.LookRotation(cam.transform.forward, Vector3.up);
                 return;
-            _root.position = cam.transform.position + cam.transform.forward * 0.85f +
-                             cam.transform.up * -0.08f;
-            _root.rotation = Quaternion.LookRotation(cam.transform.forward, Vector3.up);
+            }
+
+            ApplyWorldPlacement();
+        }
+
+        void ApplyWorldPlacement()
+        {
+            if (_root == null)
+                return;
+            if (_worldAnchor != null)
+                _root.position = _worldAnchor.position + _worldOffset;
+
+            var cam = Camera.main;
+            if (cam != null)
+            {
+                var toCam = cam.transform.position - _root.position;
+                if (toCam.sqrMagnitude > 1e-6f)
+                    _root.rotation = Quaternion.LookRotation(-toCam.normalized, Vector3.up);
+            }
+            else if (_worldAnchor != null)
+            {
+                var flat = Vector3.ProjectOnPlane(_worldAnchor.forward, Vector3.up);
+                _root.rotation = Quaternion.LookRotation(
+                    flat.sqrMagnitude > 1e-6f ? flat.normalized : Vector3.forward,
+                    Vector3.up);
+            }
         }
 
         internal void SetProgress(float t01)
@@ -125,6 +156,8 @@ namespace ThreeOS
         internal void Hide()
         {
             _visible = false;
+            _followCamera = false;
+            _worldAnchor = null;
             if (_root != null && _root.gameObject.activeSelf)
                 _root.gameObject.SetActive(false);
         }
@@ -146,7 +179,6 @@ namespace ThreeOS
             var d = TrackDepth * Inset;
             var w = Mathf.Max(1e-4f, maxW * Mathf.Clamp01(t01));
             fill.localScale = new Vector3(w, h, d);
-            // Left-anchored inside the track: left inner edge at -maxW/2.
             fill.localPosition = new Vector3(-maxW * 0.5f + w * 0.5f, 0f, 0f);
         }
 

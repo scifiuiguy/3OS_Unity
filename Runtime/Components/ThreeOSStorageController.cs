@@ -103,6 +103,16 @@ namespace ThreeOS
         /// SetActive(true) at full size or glyphs flash before the intro animation.
         /// </summary>
         private bool _palacePendingScaleIn;
+        /// <summary>
+        /// Set for the duration of a stay-soft ForceReload so LoadDualMindPalaceFixtureRoutine
+        /// does not clear SoftDismissed at the end (which would let SyncViews spawn glyphs in MR).
+        /// </summary>
+        private bool _palaceReloadStaySoft;
+        /// <summary>
+        /// After Act I FS restore + soft remount in MR: next Palace reveal must ForceReload from
+        /// disk (not TryRestorePalaceField) so Demo1/2 match the restored Documents tree.
+        /// </summary>
+        private bool _actIResetNeedsFullReveal;
         private List<string> _precacheFiles1;
         private List<string> _precacheDirs1;
         private List<string> _precacheFiles2;
@@ -264,6 +274,17 @@ namespace ThreeOS
         internal static string CombineRootRelPublic(string root, string rel) => CombineRootRel(root, rel);
 
         internal void MarkViewsDirty() => _viewsDirty = true;
+        internal bool HasVoodooPortals =>
+            _bridge != null && _bridge.IsLoaded && _bridge.VoodooPortalCount > 0;
+
+        float _suppressSafetyReconcileUntil;
+
+        /// <summary>Pause the 0.35s full MarkStorageVisualsDirty pulse (paste settle).</summary>
+        internal void SuppressSafetyReconcileFor(float seconds)
+        {
+            _suppressSafetyReconcileUntil =
+                Mathf.Max(_suppressSafetyReconcileUntil, Time.unscaledTime + Mathf.Max(0f, seconds));
+        }
 
         /// <summary>
         /// Drop Act I directory-name precache after a successful paste so any later remount
@@ -343,30 +364,40 @@ namespace ThreeOS
             }
 
             yield return null;
+            Debug.Log($"[3OS][BOOT] InstallPacks begin t={Time.realtimeSinceStartup:F2}");
             yield return InstallPacks();
+            Debug.Log($"[3OS][BOOT] InstallPacks end t={Time.realtimeSinceStartup:F2}");
             yield return null;
             yield return null;
+            Debug.Log($"[3OS][BOOT] EnsureDemoRoot1 begin t={Time.realtimeSinceStartup:F2}");
             yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
                 DemoFolderName, DemoSeedPolicy.RequireContent, null,
                 r => _demoRoot = r, s => _status = s);
+            Debug.Log($"[3OS][BOOT] EnsureDemoRoot1 end t={Time.realtimeSinceStartup:F2}");
             yield return null;
             yield return null;
+            Debug.Log($"[3OS][BOOT] EnsureDemoRoot2 begin t={Time.realtimeSinceStartup:F2}");
             yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
                 DemoFolderName2, DemoSeedPolicy.SoftSeedMindPalaceMarker, _demoRoot,
                 r => _demoRoot2 = r, s => _status = s);
+            Debug.Log($"[3OS][BOOT] EnsureDemoRoot2 end t={Time.realtimeSinceStartup:F2}");
             yield return null;
             yield return null;
+            Debug.Log($"[3OS][BOOT] EnsureDemoRoot3 begin t={Time.realtimeSinceStartup:F2}");
             yield return ThreeOSDemoRootBootstrap.EnsureDemoRoot(
                 DemoFolderName3, DemoSeedPolicy.SoftSeedMindPalaceMarker, _demoRoot,
                 r => _demoRoot3 = r, s => _status = s);
+            Debug.Log($"[3OS][BOOT] EnsureDemoRoot3 end t={Time.realtimeSinceStartup:F2}");
             if (string.IsNullOrEmpty(_demoRoot))
             {
                 Debug.LogError($"[3OS] demo load aborted: {_status}");
                 yield break;
             }
 
+            Debug.Log($"[3OS][BOOT] HideNonGlyphMovables+HeadPose begin t={Time.realtimeSinceStartup:F2}");
             HideNonGlyphMovables();
             yield return WaitForHeadPose();
+            Debug.Log($"[3OS][BOOT] HideNonGlyphMovables+HeadPose end t={Time.realtimeSinceStartup:F2}");
             yield return null;
 
             // Final Demo Act I (MR cold open): Stage is present → defer dual Mind Palace
@@ -387,7 +418,9 @@ namespace ThreeOS
             var kin = GetComponent<ThreeOSKinematicsController>() ??
                       FindFirstObjectByType<ThreeOSKinematicsController>();
             kin?.PushKinematicsParams();
-            RebuildViews();
+            // Final Demo MR cold open has no palace glyphs yet — skip empty RebuildViews hitch.
+            if (!deferPalace)
+                RebuildViews();
             if (deferPalace)
             {
                 _status =
@@ -533,8 +566,11 @@ namespace ThreeOS
 
             if (_viewsDirty)
             {
+                var swSync = System.Diagnostics.Stopwatch.StartNew();
                 _glyphs.SyncViewsFromKernel();
                 _viewsDirty = false;
+                if (swSync.ElapsedMilliseconds >= 6)
+                    Debug.Log($"[3OS][SYNC] SyncViewsFromKernel {swSync.ElapsedMilliseconds}ms f={Time.frameCount}");
             }
 
             if (_ghostsDirty)
@@ -548,7 +584,7 @@ namespace ThreeOS
             // Hover chrome only while something can be hovered.
             // Always run portal dismiss sync when chrome exists — last portal dismiss
             // drops count to 0 and must still tear down orphaned X / scissors.
-            if (_expanded.ExpandedBoxes.Count > 0)
+            if (_expanded.ExpandedBoxes.Count > 0 || _dismiss.HasGhostDismissX)
                 _dismiss.UpdateExpandedDismissAffordances();
             if (_bridge.VoodooPortalCount > 0 || _dismiss.PortalDismiss.Count > 0)
                 _dismiss.UpdatePortalDismissAffordances();
@@ -563,7 +599,10 @@ namespace ThreeOS
             _glyphs.BillboardSelectedAndVoodooLabels(billboardSel);
 
             // Catch missed dirty marks (portal open, kernel layout) without 72 Hz scans.
-            if (Time.unscaledTime >= _nextSafetyReconcileAt)
+            // Skip during paste settle — coalesced SyncViews was dipping Meta Start under 60.
+            if (Time.unscaledTime >= _nextSafetyReconcileAt &&
+                Time.unscaledTime >= _suppressSafetyReconcileUntil &&
+                !_insertAnimBusy)
             {
                 _nextSafetyReconcileAt = Time.unscaledTime + 0.35f;
                 MarkStorageVisualsDirty();
@@ -580,29 +619,28 @@ namespace ThreeOS
         {
             var installed = 0;
             var installedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            // Spread glyph installs across frames — LoadAll + Install are the cold-boot hitch.
-            yield return null;
-            var packs = Resources.LoadAll<TextAsset>("3OS/glyphs");
-            Debug.Log($"[3OS] Resources.LoadAll(3OS/glyphs) → {packs?.Length ?? 0} TextAsset(s)");
-            yield return null;
-            if (packs != null)
+            var resourcePackNames = new[]
             {
-                var i = 0;
-                foreach (var pack in packs)
+                "box", "box_open", "gltf_mark", "blender_mark", "scissors",
+                "heart", "heart_filled", "arrow", "mic", "mr", "vr"
+            };
+            foreach (var stem in resourcePackNames)
+            {
+                var request = Resources.LoadAsync<TextAsset>($"3OS/glyphs/{stem}");
+                yield return request;
+                var pack = request.asset as TextAsset;
+                if (pack == null)
+                    continue;
+                var bytes = pack.bytes;
+                if (bytes == null || bytes.Length == 0)
+                    continue;
+
+                var succeeded = false;
+                yield return InstallGlyphPackOnWorker(stem, bytes, value => succeeded = value);
+                if (succeeded)
                 {
-                    if (pack == null || pack.bytes == null || pack.bytes.Length == 0)
-                        continue;
-                    if (_bridge.InstallGlyphPack(pack.bytes))
-                    {
-                        installed++;
-                        installedNames.Add(pack.name);
-                    }
-                    else
-                        Debug.LogWarning($"[3OS] failed pack {pack.name}: {_bridge.LastError}");
-                    // Two frames between packs keeps Act I MR open smoother on Quest.
-                    yield return null;
-                    if ((++i & 1) == 0)
-                        yield return null;
+                    installed++;
+                    installedNames.Add(stem);
                 }
             }
 
@@ -633,21 +671,24 @@ namespace ThreeOS
                         Debug.LogWarning($"[3OS] StreamingAssets pack miss {fileName}: {req.error}");
                         continue;
                     }
-                    if (_bridge.InstallGlyphPack(req.downloadHandler.data))
+                    var bytes = req.downloadHandler.data;
+                    var succeeded = false;
+                    yield return InstallGlyphPackOnWorker(stem, bytes, value => succeeded = value);
+                    if (succeeded)
                     {
                         installed++;
                         installedNames.Add(stem);
                         Debug.Log(
-                            $"[3OS] installed StreamingAssets pack {fileName} ({req.downloadHandler.data.Length} bytes)");
+                            $"[3OS] installed StreamingAssets pack {fileName} ({bytes.Length} bytes)");
                     }
-                    else
-                        Debug.LogWarning($"[3OS] failed StreamingAssets pack {fileName}: {_bridge.LastError}");
                 }
 #else
                 if (File.Exists(url))
                 {
                     var bytes = File.ReadAllBytes(url);
-                    if (_bridge.InstallGlyphPack(bytes))
+                    var succeeded = false;
+                    yield return InstallGlyphPackOnWorker(stem, bytes, value => succeeded = value);
+                    if (succeeded)
                     {
                         installed++;
                         installedNames.Add(stem);
@@ -663,6 +704,33 @@ namespace ThreeOS
             if (installed < 3)
                 Debug.LogWarning(
                     $"[3OS] only {installed}/3 glyph packs installed — continuing with procedural glyphs");
+        }
+
+        private IEnumerator InstallGlyphPackOnWorker(string name, byte[] bytes, Action<bool> onComplete)
+        {
+            var install = _bridge.InstallGlyphPackAsync(bytes);
+            while (!install.IsCompleted)
+                yield return null;
+
+            if (install.IsFaulted)
+            {
+                Debug.LogWarning(
+                    $"[3OS] failed pack {name}: {install.Exception?.GetBaseException().Message}");
+                onComplete(false);
+                yield break;
+            }
+
+            if (install.IsCanceled)
+            {
+                Debug.LogWarning($"[3OS] install cancelled for pack {name}");
+                onComplete(false);
+                yield break;
+            }
+
+            var succeeded = install.Result;
+            if (!succeeded)
+                Debug.LogWarning($"[3OS] failed pack {name}: {_bridge.LastError}");
+            onComplete(succeeded);
         }
 
         private bool LoadDualMindPalaceFixture(ThreeOSPose origin)
@@ -800,21 +868,32 @@ namespace ThreeOS
                 yield break;
             }
 
-            // Prefer Act I precache; wait briefly if still warming (names only — not the hitch).
-            if (!_palaceNamesPrecached && !string.IsNullOrEmpty(_demoRoot))
+            // Prefer Act I precache only when we still need a disk LoadDual. Soft restore
+            // already has a kernel fixture — waiting here added ~2s after Act I reset.
+            if (!_palaceNamesPrecached && !string.IsNullOrEmpty(_demoRoot) &&
+                !(_palaceFixtureLoaded && _palaceSoftDismissed))
             {
                 var waitPc = Time.realtimeSinceStartup + 2f;
                 while (!_palaceNamesPrecached && Time.realtimeSinceStartup < waitPc)
                     yield return null;
             }
 
-            if (_palaceFixtureLoaded && _palaceSoftDismissed)
+            if (_palaceFixtureLoaded && _palaceSoftDismissed && !_actIResetNeedsFullReveal)
             {
                 _palacePendingScaleIn = true;
                 if (!TryRestorePalaceField(spawn))
                     Debug.LogError($"[3OS] Palace restore failed: {_status}");
                 HidePalaceGlyphsPendingScaleIn(_mrPersistedSelectionId);
                 yield break;
+            }
+
+            // Fallback only when fixture was never remounted in MR (rare).
+            if (_actIResetNeedsFullReveal)
+            {
+                Debug.Log("[3OS] RevealPalace: Act I reset → full disk remount (no soft fixture)");
+                _palaceFixtureLoaded = false;
+                _palaceSoftDismissed = false;
+                _actIResetNeedsFullReveal = false;
             }
 
             if (_palaceFixtureLoaded && !_palaceSoftDismissed)
@@ -928,9 +1007,13 @@ namespace ThreeOS
                 Debug.LogWarning($"[3OS] layout MindPalace C: {_bridge.LastError}");
             yield return null;
             _palaceFixtureLoaded = true;
-            _palaceSoftDismissed = false;
+            // Stay-soft remount (Act I reset in MR): keep SoftDismissed latched so SyncViews
+            // cannot spawn Demo/Demo3 glyphs into the office between load and SoftDismiss.
+            if (!_palaceReloadStaySoft)
+                _palaceSoftDismissed = false;
             Debug.Log(
-                $"[3OS] mind-palace fixture L={mpL} R={mpR} C={_mpCenterId} entities={_palaceEntityIds.Count}");
+                $"[3OS] mind-palace fixture L={mpL} R={mpR} C={_mpCenterId} entities={_palaceEntityIds.Count}" +
+                $" staySoft={_palaceReloadStaySoft}");
             yield return null;
         }
 
@@ -1463,21 +1546,21 @@ namespace ThreeOS
         /// </summary>
         public IEnumerator DismissPalaceToMr(Transform mrAnchorSpawn)
         {
-            // Collapse X is a world-rooted GO (not parented under the box glyph). Tear it down
-            // before destroying box views or the X floats into MR after the parent dismisses.
-            _expanded?.TeardownAllExpandedBoxes(collapseKernel: true);
-
+            // Snapshot selection BEFORE collapsing expanded boxes. Kernel collapse_box clears
+            // selected_id_ for children of the open box — that was dropping DemonA on the first
+            // VR→MR wipe whenever DemonProject (or any parent) was still expanded.
             ulong keepId = 0;
             if (_bridge != null && _bridge.TryGetSelection(out var sel) && sel != 0)
                 keepId = sel;
 
-            // Detach selection from cluster before scale-out.
+            GameObject keepRoot = null;
             if (keepId != 0 && _glyphs.Views.TryGetValue(keepId, out var keepView) &&
                 keepView.Root != null)
             {
-                keepView.Root.transform.SetParent(null, true);
-                _mrPersistedWorldPos = keepView.Root.transform.position;
-                _mrPersistedWorldRot = keepView.Root.transform.rotation;
+                keepRoot = keepView.Root;
+                keepRoot.transform.SetParent(null, true);
+                _mrPersistedWorldPos = keepRoot.transform.position;
+                _mrPersistedWorldRot = keepRoot.transform.rotation;
                 _mrPersistedSelectionId = keepId;
                 _entityMindPalace.TryGetValue(keepId, out _mrPersistedOriginalMpId);
                 _bridge.SetMindPalaceRoot(keepId, 0);
@@ -1490,6 +1573,24 @@ namespace ThreeOS
             {
                 _mrPersistedSelectionId = 0;
                 _mrPersistedOriginalMpId = 0;
+            }
+
+            // Collapse X is a world-rooted GO (not parented under the box glyph). Tear it down
+            // after persist snapshot so CollapseBox cannot clear the keep selection first.
+            _expanded?.TeardownAllExpandedBoxes(collapseKernel: true);
+
+            // Teardown clears anim locks and collapse sets in_field=false on box children —
+            // re-assert the MR carry so SyncViews / soft-dismiss keep the glyph.
+            if (keepId != 0)
+            {
+                _bridge.StorageSetInField(keepId, true);
+                _bridge.SetSelection(keepId);
+                _animLockedIds.Add(keepId);
+                if (keepRoot != null)
+                {
+                    keepRoot.SetActive(true);
+                    keepRoot.transform.SetPositionAndRotation(_mrPersistedWorldPos, _mrPersistedWorldRot);
+                }
             }
 
             // Drop portals/ghosts first — open portals were leaking Palace near-field into MR.
@@ -1578,6 +1679,7 @@ namespace ThreeOS
                 }
             }
 
+            DestroyOrphanGlyphRoots();
             _dismiss.ClearPortalDismissUi();
         }
 
@@ -1587,21 +1689,21 @@ namespace ThreeOS
         /// </summary>
         void SoftDismissPalaceAfterRemount()
         {
-            if (_bridge == null || !_bridge.IsLoaded)
-                return;
-
-            _expanded?.TeardownAllExpandedBoxes(collapseKernel: true);
-            DismissAllVoodooPortals();
-            _fs?.CancelPasteProgressUi();
-
-            var count = _bridge.StorageItemCount();
-            for (uint i = 0; i < count; i++)
+            if (_bridge != null && _bridge.IsLoaded)
             {
-                if (!_bridge.TryGetWorkspaceItem(i, out var item) || item.entityId == 0)
-                    continue;
-                if (item.entityId == _mrPersistedSelectionId)
-                    continue;
-                _bridge.StorageSetInField(item.entityId, false);
+                _expanded?.TeardownAllExpandedBoxes(collapseKernel: true);
+                DismissAllVoodooPortals();
+                _fs?.CancelPasteProgressUi();
+
+                var count = _bridge.StorageItemCount();
+                for (uint i = 0; i < count; i++)
+                {
+                    if (!_bridge.TryGetWorkspaceItem(i, out var item) || item.entityId == 0)
+                        continue;
+                    if (item.entityId == _mrPersistedSelectionId)
+                        continue;
+                    _bridge.StorageSetInField(item.entityId, false);
+                }
             }
 
             var doomed = new List<ulong>(_glyphs.Views.Keys);
@@ -1617,12 +1719,56 @@ namespace ThreeOS
                 }
             }
 
+            // Orphans: a cancelled RebuildViewsSpread can Clear() the dict after queuing Destroy
+            // on only some roots — leftover Glyph_TestW / Glyph_DemonProject then float in MR
+            // even though disk/kernel already match the correct Demo set.
+            DestroyOrphanGlyphRoots();
+
             _palaceSoftDismissed = true;
             _palacePendingScaleIn = false;
             _glyphs.ClearGhostViews();
             _dismiss.ClearPortalDismissUi();
             MarkStorageVisualsDirty();
             Debug.Log("[3OS] SoftDismissPalaceAfterRemount — palace fixture kept, glyphs hidden in MR");
+        }
+
+        /// <summary>
+        /// Destroy scene roots named Glyph_* that are no longer tracked in Views (except MR carry).
+        /// </summary>
+        void DestroyOrphanGlyphRoots()
+        {
+            string keepName = null;
+            if (_mrPersistedSelectionId != 0 &&
+                _glyphs.Views.TryGetValue(_mrPersistedSelectionId, out var keep) &&
+                keep?.Root != null)
+                keepName = keep.Root.name;
+
+            var all = FindObjectsByType<Transform>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            for (var i = 0; i < all.Length; i++)
+            {
+                var t = all[i];
+                if (t == null || t.parent != null)
+                    continue;
+                var n = t.name;
+                if (string.IsNullOrEmpty(n) || !n.StartsWith("Glyph_", StringComparison.Ordinal))
+                    continue;
+                if (keepName != null && n == keepName)
+                    continue;
+                // Still tracked — leave for Views teardown / SyncViews.
+                var tracked = false;
+                foreach (var kv in _glyphs.Views)
+                {
+                    if (kv.Value?.Root == t.gameObject)
+                    {
+                        tracked = true;
+                        break;
+                    }
+                }
+
+                if (tracked)
+                    continue;
+                Destroy(t.gameObject);
+            }
         }
 
         void DismissAllVoodooPortals()
@@ -1891,31 +2037,63 @@ namespace ThreeOS
             InvalidatePalaceNamePrecache();
             var staySoft = remainHiddenInMr || _palaceSoftDismissed;
             if (_palaceFixtureLoaded || staySoft)
+            {
                 yield return ForceReloadMindPalaceRoutine(remainSoftDismissed: staySoft);
+                // ForceReload already rescanned restored Demo dirs. Do NOT force a second
+                // LoadDual on the next MR→Palace wipe — soft restore rebuilds glyphs only.
+                _actIResetNeedsFullReveal = false;
+                StartCoroutine(RefreshPalaceNamePrecacheFastRoutine());
+            }
+        }
+
+        /// <summary>
+        /// Refill directory-name precache after Act I remount without the cold-open 4s delay.
+        /// </summary>
+        IEnumerator RefreshPalaceNamePrecacheFastRoutine()
+        {
+            yield return PrecacheOneRootRoutine(_demoRoot, files => _precacheFiles1 = files,
+                dirs => _precacheDirs1 = dirs);
+            yield return PrecacheOneRootRoutine(_demoRoot2, files => _precacheFiles2 = files,
+                dirs => _precacheDirs2 = dirs);
+            yield return PrecacheOneRootRoutine(_demoRoot3, files => _precacheFiles3 = files,
+                dirs => _precacheDirs3 = dirs);
+            _palaceNamesPrecached = true;
+            Debug.Log("[3OS] Palace names precache refreshed (post Act I remount)");
         }
 
         /// <summary>
         /// After a paste batch: re-scan dest box folders from the correct Demo1/2/3 root so
         /// DemonProject (Demo3) is not stuck showing 0 children when disk actually filled.
+        /// Spread across frames — a sync Documents list at bar=100% was the paste FPS spike.
         /// </summary>
         internal void RequestPostPasteChildHeal()
         {
+            StartCoroutine(RequestPostPasteChildHealRoutine());
+        }
+
+        internal IEnumerator RequestPostPasteChildHealRoutine()
+        {
             if (_fs == null || !_fs.HasLastPasteBatch || _bridge == null || !_bridge.IsLoaded)
-                return;
+                yield break;
 
             var destBoxIds = new HashSet<ulong>();
-            var count = _bridge.StorageItemCount();
-            for (uint i = 0; i < count; i++)
+            // Prefer the actual paste destination box ids recorded during the batch.
+            foreach (var id in _fs.LastPasteDestBoxIds)
+                destBoxIds.Add(id);
+
+            if (destBoxIds.Count == 0)
             {
-                if (!_bridge.TryGetWorkspaceItem(i, out var item) || item.kind != 1)
-                    continue;
-                // Heal any open-capable box that looks like a paste target (has DemonProject name
-                // or lives under Demo3). Cheap name match covers the Final Demo path.
-                if (string.Equals(item.Name, "DemonProject", StringComparison.OrdinalIgnoreCase) ||
-                    (_entityMindPalace.TryGetValue(item.entityId, out var mp) && mp == _mpCenterId &&
-                     _mpCenterId != 0))
+                var count = _bridge.StorageItemCount();
+                for (uint i = 0; i < count; i++)
                 {
-                    destBoxIds.Add(item.entityId);
+                    if (!_bridge.TryGetWorkspaceItem(i, out var item) || item.kind != 1)
+                        continue;
+                    if (string.Equals(item.Name, "DemonProject", StringComparison.OrdinalIgnoreCase) ||
+                        (_entityMindPalace.TryGetValue(item.entityId, out var mp) && mp == _mpCenterId &&
+                         _mpCenterId != 0))
+                    {
+                        destBoxIds.Add(item.entityId);
+                    }
                 }
             }
 
@@ -1924,11 +2102,15 @@ namespace ThreeOS
                 var rel = _expanded.ResolveBoxRelativePath(boxId);
                 if (string.IsNullOrEmpty(rel))
                     rel = "DemonProject";
-                if (_expanded.EnsureBoxChildren(boxId, rel, out var kids))
+                // nestedCount=0 — skip per-dir CountFilesInDirectory / ListDirectoryNames
+                // (those were the remaining sub-60 paste hitch on Quest Documents).
+                if (_expanded.EnsureBoxChildren(boxId, rel, out var kids, skipNestedCounts: true))
                     Debug.Log($"[3OS] post-paste heal box={boxId} rel={rel} children={kids.Count}");
+                // One Documents list per frame — keeps the post-100% hitch off a single frame.
+                yield return null;
             }
 
-            MarkViewsDirty();
+            // Dirty deferred by InsertSequence after extra yields — avoid double SyncViews.
         }
 
         /// <summary>
@@ -1948,29 +2130,41 @@ namespace ThreeOS
             var staySoft = remainSoftDismissed || _palaceSoftDismissed;
 
             var origin = _palaceLayoutOriginValid ? _palaceLayoutOrigin : _layoutHeadPose;
-            // Soft-dismiss / pending-scale flags must not block the remount load itself.
+            // Soft-dismiss must stay latched for SyncViews during the remount when still in MR —
+            // otherwise LoadDual's end-of-routine SoftDismissed=false + RebuildViewsSpread
+            // flashes (and can orphan) Palace glyphs into the office. Kernel load itself does
+            // not need SoftDismissed cleared.
             _palaceFixtureLoaded = false;
-            _palaceSoftDismissed = false;
+            _palaceSoftDismissed = staySoft;
             _palacePendingScaleIn = false;
+            _palaceReloadStaySoft = staySoft;
             _bridge.VoodooCutCancel();
+            // Drop any live/orphan Glyph_* roots before the scan so a cancelled prior rebuild
+            // cannot leave TestW-style names floating in MR after reset.
+            if (staySoft)
+                SoftDismissPalaceAfterRemount();
             yield return LoadDualMindPalaceFixtureRoutine(origin);
+            _palaceReloadStaySoft = false;
             if (!_palaceFixtureLoaded)
             {
                 Debug.LogError($"[3OS] ForceReload failed: {_status}");
+                if (staySoft)
+                    SoftDismissPalaceAfterRemount();
                 yield break;
             }
 
-            yield return RebuildViewsSpreadRoutine(viewsPerFrame: 6);
-            MarkGhostsDirty();
-
             if (staySoft)
             {
+                // Kernel fixture is current; do NOT RebuildViews — that was recreating Demo /
+                // Demo3 glyphs in the office (and orphaning stale Glyph_TestW… roots).
                 SoftDismissPalaceAfterRemount();
                 _status = "palace remounted (soft-dismissed in MR)";
-                Debug.Log("[3OS] ForceReload Mind Palace complete (kept soft-dismissed)");
+                Debug.Log("[3OS] ForceReload Mind Palace complete (kept soft-dismissed, no glyph rebuild)");
             }
             else
             {
+                yield return RebuildViewsSpreadRoutine(viewsPerFrame: 6);
+                MarkGhostsDirty();
                 _status = "palace remounted from disk";
                 Debug.Log("[3OS] ForceReload Mind Palace complete");
             }

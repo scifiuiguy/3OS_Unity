@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using UnityEngine;
 
 namespace ThreeOS
@@ -1313,6 +1314,9 @@ namespace ThreeOS
                 return false;
             }
         }
+
+        internal Task<bool> InstallGlyphPackAsync(byte[] bytes) =>
+            Task.Run(() => InstallGlyphPack(bytes));
 
         public bool TryGetSelection(out ulong entityId)
         {

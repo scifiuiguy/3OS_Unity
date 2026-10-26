@@ -79,20 +79,58 @@ namespace ThreeOS
             _boxAnimBusy = true;
             var boxName = boxItem.Name;
             var boxRel = ResolveBoxRelativePath(boxId);
+            var swOpen = System.Diagnostics.Stopwatch.StartNew();
+            var openStartFrame = Time.frameCount;
             try
             {
-                if (!EnsureBoxChildren(boxId, boxRel, out var childIds))
+                // Listing + nested-count IO runs on a worker; the open gesture waits a few frames
+                // instead of freezing one frame for the whole directory scan.
+                var prefetch = BeginPrefetchListing(boxId, boxRel);
+                while (!prefetch.IsCompleted)
+                {
+                    yield return null;
+                }
+
+                var listing = prefetch.IsFaulted ? null : prefetch.Result;
+                if (prefetch.IsFaulted)
+                {
+                    Debug.LogWarning($"[3OS] open listing prefetch failed: {prefetch.Exception?.GetBaseException().Message}");
+                }
+
+                if (!EnsureBoxChildren(boxId, boxRel, out var childIds, prefetched: listing))
                 {
                     _status = $"open failed: {_bridge.LastError}";
                     yield break;
                 }
 
+                // Build missing child views under a per-frame time budget (hidden) so large
+                // folders spread view construction instead of landing in one frame.
+                var viewBudget = System.Diagnostics.Stopwatch.StartNew();
+                foreach (var childId in childIds)
+                {
+                    if ((!_views.TryGetValue(childId, out var existingView) || existingView.Root == null) &&
+                        _host.TryFindItem(childId, out var pendingItem))
+                    {
+                        var created = _host.Glyphs.CreateView(pendingItem);
+                        if (created?.Root != null)
+                            created.Root.SetActive(false);
+                        _views[childId] = created;
+                        if (viewBudget.ElapsedMilliseconds >= 3)
+                        {
+                            yield return null;
+                            viewBudget.Restart();
+                        }
+                    }
+                }
+
+                var tEnsure = swOpen.ElapsedMilliseconds;
                 if (!_bridge.ExpandBox(boxId))
                 {
                     _status = $"expand failed: {_bridge.LastError}";
                     yield break;
                 }
 
+                var tExpand = swOpen.ElapsedMilliseconds;
                 childIds = CollectChildIds(boxId);
                 var targets = new Dictionary<ulong, Pose>();
                 var centroid = Vector3.zero;
@@ -162,6 +200,9 @@ namespace ThreeOS
 
                 animNode.transform.position = xPos;
                 animNode.transform.localScale = Vector3.one * startScale;
+                var tViews = swOpen.ElapsedMilliseconds;
+                Debug.Log($"[3OS][OPEN] {boxName} kids={childIds.Count} prepare={tEnsure}ms expand={tExpand - tEnsure}ms " +
+                          $"parent={tViews - tExpand}ms frames={Time.frameCount - openStartFrame}");
 
                 var duration = Mathf.Max(0.05f, BoxExpandAnimSeconds);
                 var elapsed = 0f;
@@ -268,14 +309,24 @@ namespace ThreeOS
             return parts.Count > 0 ? string.Join("/", parts) : string.Empty;
         }
 
-        internal bool EnsureBoxChildren(ulong boxId, string boxRelPath, out List<ulong> childIds)
+        internal bool EnsureBoxChildren(ulong boxId, string boxRelPath, out List<ulong> childIds,
+            bool skipNestedCounts = false, BoxListing prefetched = null)
         {
             if (string.IsNullOrEmpty(boxRelPath))
             {
                 boxRelPath = ResolveBoxRelativePath(boxId);
             }
 
-            CollectBoxFolderEntries(boxId, boxRelPath, out var files, out var dirs);
+            List<string> files, dirs;
+            if (prefetched != null)
+            {
+                files = prefetched.Files;
+                dirs = prefetched.Dirs;
+            }
+            else
+            {
+                CollectBoxFolderEntries(boxId, boxRelPath, out files, out dirs);
+            }
 
             // Reuse existing workspace children under this box (inserts + prior expands).
             var existingByName = new Dictionary<string, ulong>(System.StringComparer.OrdinalIgnoreCase);
@@ -321,20 +372,27 @@ namespace ThreeOS
 
                 var rel = $"{boxRelPath}/{name}";
                 uint nestedCount = 0;
-                foreach (var root in _host.Fs.CandidateDemoRootsFor(boxLeaf))
+                if (prefetched != null)
                 {
-                    if (string.IsNullOrEmpty(root))
+                    prefetched.NestedCounts.TryGetValue(name, out nestedCount);
+                }
+                else if (!skipNestedCounts)
+                {
+                    foreach (var root in _host.Fs.CandidateDemoRootsFor(boxLeaf))
                     {
-                        continue;
-                    }
+                        if (string.IsNullOrEmpty(root))
+                        {
+                            continue;
+                        }
 
-                    var nestedPath = Path.Combine(root, boxRelPath.Replace('/', Path.DirectorySeparatorChar), name);
-                    var c = ThreeOSAndroidStorage.CountFilesInDirectory(nestedPath);
-                    // Nested boxes often contain only folders — count dirs too.
-                    c += (uint)ThreeOSAndroidStorage.ListDirectoryNames(nestedPath).Count;
-                    if (c > nestedCount)
-                    {
-                        nestedCount = c;
+                        var nestedPath = Path.Combine(root, boxRelPath.Replace('/', Path.DirectorySeparatorChar), name);
+                        var c = ThreeOSAndroidStorage.CountFilesInDirectory(nestedPath);
+                        // Nested boxes often contain only folders — count dirs too.
+                        c += (uint)ThreeOSAndroidStorage.ListDirectoryNames(nestedPath).Count;
+                        if (c > nestedCount)
+                        {
+                            nestedCount = c;
+                        }
                     }
                 }
 
@@ -630,10 +688,83 @@ namespace ThreeOS
         internal void CollectBoxFolderEntries(ulong boxId, string boxRelPath, out List<string> files,
             out List<string> dirs)
         {
-            var fileSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
-            var dirSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            var folders = ResolveListingFolders(boxId, boxRelPath);
+            ListFolders(folders, out files, out dirs);
+        }
+
+        internal sealed class BoxListing
+        {
+            public List<string> Files;
+            public List<string> Dirs;
+            public readonly Dictionary<string, uint> NestedCounts =
+                new Dictionary<string, uint>(System.StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Lists a folder (and nested-child counts for folders with no workspace item yet) on a
+        /// worker so big directories never stall the open frame. Path/root resolution runs here
+        /// on the main thread (touches Unity APIs); only plain IO runs off-thread.
+        /// </summary>
+        internal System.Threading.Tasks.Task<BoxListing> BeginPrefetchListing(ulong boxId, string boxRelPath)
+        {
+            if (string.IsNullOrEmpty(boxRelPath))
+            {
+                boxRelPath = ResolveBoxRelativePath(boxId);
+            }
+
+            var folders = ResolveListingFolders(boxId, boxRelPath);
             var rel = (boxRelPath ?? string.Empty).Replace('/', Path.DirectorySeparatorChar)
                 .Replace('\\', Path.DirectorySeparatorChar);
+            var boxFsRoot = _host.ResolveFsRootForEntity(boxId, boxRelPath);
+            var boxLeaf = string.IsNullOrEmpty(boxFsRoot)
+                ? ThreeOSStorageController.DemoFolderName
+                : Path.GetFileName(boxFsRoot.TrimEnd('/', '\\'));
+            var nestedRoots = new List<string>(_host.Fs.CandidateDemoRootsFor(boxLeaf));
+            var existing = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var id in CollectChildIds(boxId))
+            {
+                if (_host.TryFindItem(id, out var item))
+                    existing.Add(item.Name);
+            }
+
+            return System.Threading.Tasks.Task.Run(() =>
+            {
+                var result = new BoxListing();
+                ThreeOSAndroidStorage.RunWithJni(() =>
+                {
+                    ListFolders(folders, out result.Files, out result.Dirs);
+                    foreach (var name in result.Dirs)
+                    {
+                        if (existing.Contains(name))
+                            continue;
+                        uint best = 0;
+                        foreach (var root in nestedRoots)
+                        {
+                            if (string.IsNullOrEmpty(root))
+                                continue;
+                            var nestedPath = Path.Combine(root, rel, name);
+                            var c = ThreeOSAndroidStorage.CountFilesInDirectory(nestedPath);
+                            c += (uint)ThreeOSAndroidStorage.ListDirectoryNames(nestedPath).Count;
+                            if (c > best)
+                                best = c;
+                        }
+
+                        result.NestedCounts[name] = best;
+                    }
+                });
+                return result;
+            });
+        }
+
+        private List<string> ResolveListingFolders(ulong boxId, string boxRelPath)
+        {
+            var rel = (boxRelPath ?? string.Empty).Replace('/', Path.DirectorySeparatorChar)
+                .Replace('\\', Path.DirectorySeparatorChar);
+            var folders = new List<string>();
+            if (string.IsNullOrEmpty(rel))
+            {
+                return folders;
+            }
 
             var roots = new List<string>();
             var mpRoot = boxId != 0 ? _host.ResolveFsRootForEntity(boxId, boxRelPath) : null;
@@ -667,12 +798,19 @@ namespace ThreeOS
 
             foreach (var root in roots)
             {
-                if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(rel))
-                {
-                    continue;
-                }
+                if (!string.IsNullOrEmpty(root))
+                    folders.Add(Path.Combine(root, rel));
+            }
 
-                var folder = Path.Combine(root, rel);
+            return folders;
+        }
+
+        private static void ListFolders(List<string> folders, out List<string> files, out List<string> dirs)
+        {
+            var fileSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            var dirSet = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var folder in folders)
+            {
                 if (!Directory.Exists(folder) && !ThreeOSAndroidStorage.Exists(folder))
                 {
                     continue;

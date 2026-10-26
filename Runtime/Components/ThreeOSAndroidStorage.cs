@@ -161,6 +161,46 @@ namespace ThreeOS
             return false;
         }
 
+        /// <summary>
+        /// <c>rm -rf</c> via ProcessBuilder — Quest Documents often keeps folders after
+        /// java.io.File.delete / NIO even when children were removed.
+        /// </summary>
+        public static bool ShellRm(string path)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (string.IsNullOrEmpty(path))
+                return true;
+            try
+            {
+                if (!Exists(path))
+                    return true;
+
+                var quoted = "'" + path.Replace("'", "'\\''") + "'";
+                var script = "rm -rf -- " + quoted;
+                using var list = new AndroidJavaObject("java.util.ArrayList");
+                list.Call<bool>("add", "/system/bin/sh");
+                list.Call<bool>("add", "-c");
+                list.Call<bool>("add", script);
+                using var pb = new AndroidJavaObject("java.lang.ProcessBuilder", list);
+                pb.Call<AndroidJavaObject>("redirectErrorStream", true);
+                using var proc = pb.Call<AndroidJavaObject>("start");
+                var exit = proc.Call<int>("waitFor");
+                if (exit == 0 && !Exists(path))
+                {
+                    Debug.Log($"[3OS] ShellRm OK {path}");
+                    return true;
+                }
+
+                Debug.LogWarning($"[3OS] ShellRm exit={exit} remains={Exists(path)} {path}");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[3OS] ShellRm: {ex.Message}");
+            }
+#endif
+            return !Exists(path);
+        }
+
         /// <summary>Append one line to persistent paste_fs.log (survives logcat clears).</summary>
         public static void AppendPasteFsLog(string line)
         {
@@ -243,6 +283,90 @@ namespace ThreeOS
             }
 #endif
             return false;
+        }
+
+        /// <summary>
+        /// Recursive delete for Documents folders. Plain <see cref="JavaDelete"/> fails on
+        /// non-empty dirs — Act I restore left DemonProject duplicates because of that.
+        /// </summary>
+        public static bool JavaDeleteRecursive(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return true;
+
+            try
+            {
+                if (Directory.Exists(path))
+                {
+                    try { Directory.Delete(path, true); }
+                    catch { /* fall through */ }
+                }
+                else if (File.Exists(path))
+                {
+                    try { File.Delete(path); }
+                    catch { /* fall through */ }
+                }
+            }
+            catch { /* best-effort */ }
+
+            if (!Exists(path))
+                return true;
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using var f = new AndroidJavaObject("java.io.File", path);
+                if (!f.Call<bool>("exists"))
+                    return true;
+
+                if (f.Call<bool>("isDirectory"))
+                {
+                    var children = f.Call<AndroidJavaObject[]>("listFiles");
+                    if (children != null)
+                    {
+                        foreach (var child in children)
+                        {
+                            if (child == null)
+                                continue;
+                            using (child)
+                            {
+                                var childPath = child.Call<string>("getAbsolutePath");
+                                JavaDeleteRecursive(childPath);
+                            }
+                        }
+                    }
+                }
+
+                f.Call<bool>("setWritable", true);
+                if (f.Call<bool>("delete") && !Exists(path))
+                {
+                    Debug.Log($"[3OS] JavaDeleteRecursive OK {path}");
+                    return true;
+                }
+
+                try
+                {
+                    using var os = new AndroidJavaClass("android.system.Os");
+                    os.CallStatic("remove", path);
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning($"[3OS] JavaDeleteRecursive Os.remove: {ex.Message}");
+                }
+
+                if (!Exists(path))
+                    return true;
+
+                // Documents MTP ghosts: shell rm -rf is the path paste already trusts for mv.
+                if (ShellRm(path))
+                    return true;
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[3OS] JavaDeleteRecursive: {ex.Message}");
+            }
+#endif
+            return !Exists(path);
         }
 
         /// <summary>

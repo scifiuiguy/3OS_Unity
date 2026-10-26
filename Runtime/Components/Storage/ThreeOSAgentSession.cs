@@ -11,6 +11,9 @@ namespace ThreeOS
     {
         public static event Action SpeakSelected;
 
+        /// <summary>Fired on rising edge of Agent Multi-Choice open (voodoo FocusAnchor release).</summary>
+        public static event Action AgentOpened;
+
         /// <summary>Live agent widget root while open; null when destroyed/closed.</summary>
         public static Transform WidgetRoot { get; private set; }
 
@@ -44,7 +47,11 @@ namespace ThreeOS
         internal static void SetWidgetRoot(Transform root, bool agentOpen)
         {
             WidgetRoot = root;
-            IsAgentOpen = agentOpen && root != null;
+            var nowOpen = agentOpen && root != null;
+            var rising = nowOpen && !IsAgentOpen;
+            IsAgentOpen = nowOpen;
+            if (rising)
+                AgentOpened?.Invoke();
         }
 
         /// <summary>Shrink agent widget toward 0 (no deallocate).</summary>
