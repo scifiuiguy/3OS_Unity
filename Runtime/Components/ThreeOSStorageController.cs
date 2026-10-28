@@ -11,7 +11,7 @@ namespace ThreeOS
     /// Demo workspace host: dual-mind-palace load, glyph views, trigger select/drag, snap-insert,
     /// portal/expanded dismiss chrome, write-through FS cut.
     /// </summary>
-    [DefaultExecutionOrder(0)]
+    [DefaultExecutionOrder(100)]
     public sealed class ThreeOSStorageController : MonoBehaviour
     {
         public const string DemoFolderName = "3OS_Demo";
@@ -165,6 +165,17 @@ namespace ThreeOS
         uint _lastVoodooPortalCount;
         /// After a portal parks, near BBs bump-lerp (~0.22s) — follow ghost poses only then.
         float _ghostFollowUntil = -1f;
+        /// After multi-summon, SyncViews every frame while pose-lerps (~0.2s) so all glyphs travel.
+        float _summonPoseFollowUntil = -1f;
+        readonly System.Collections.Generic.List<ulong> _summonFollowIds =
+            new System.Collections.Generic.List<ulong>(16);
+        /// <summary>Snapshot of multi-select ids for the current telekinesis drag (355).</summary>
+        readonly System.Collections.Generic.List<ulong> _multiSelectTelekinesisIds =
+            new System.Collections.Generic.List<ulong>(16);
+        bool _multiSelectTelekinesisActive;
+        ulong _multiSelectLeaderTrackedId;
+        Vector3 _multiSelectLeaderLastWorldPos;
+        bool _multiSelectLeaderPoseValid;
 
         // Collaborator access
         internal ThreeOSBridge Bridge => _bridge;
@@ -175,6 +186,17 @@ namespace ThreeOS
         internal ThreeOSStorageWriteThrough Fs => _fs;
         internal ThreeOSExpandedBoxController Expanded => _expanded;
         internal ThreeOSStorageInteraction Interaction => _interaction;
+        ThreeOSSelectionGestures _gestures;
+        internal ThreeOSSelectionGestures Gestures => _gestures ??= new ThreeOSSelectionGestures(this);
+
+        /// <summary>Solo kernel before <see cref="ThreeOSBridge.Tick"/> — see InputRouter.</summary>
+        internal void RunSoloDropKernelBeforeTick(ref InteropInputFrame frame, ref InteropHandSample left,
+            ref InteropHandSample right)
+        {
+            if (!DemoActive || _bridge == null || !_bridge.IsLoaded || GhostDragging || Possessing)
+                return;
+            Gestures.TickSoloKernel(ref frame, ref left, ref right);
+        }
         internal Dictionary<ulong, ThreeOSExpandedBoxUi> ExpandedBoxes => _expanded.ExpandedBoxes;
         internal HashSet<ulong> AnimLockedIds => _animLockedIds;
         internal string StatusField { get => _status; set => _status = value; }
@@ -302,6 +324,151 @@ namespace ThreeOS
             Debug.Log("[3OS] Palace name precache invalidated after paste");
         }
         internal void MarkGhostsDirty() => _ghostsDirty = true;
+
+        /// <summary>Keep real glyph SyncViews hot while kernel summon pose-lerps finish.</summary>
+        internal void BeginSummonPoseFollow(ulong[] ids, int count, float seconds = 0.35f)
+        {
+            _summonFollowIds.Clear();
+            for (var i = 0; i < count && ids != null; i++)
+            {
+                if (ids[i] != 0) _summonFollowIds.Add(ids[i]);
+            }
+            _summonPoseFollowUntil = Time.unscaledTime + Mathf.Max(0.05f, seconds);
+            _viewsDirty = true;
+        }
+
+        void ApplySummonFollowPoses()
+        {
+            if (Time.unscaledTime >= _summonPoseFollowUntil || _summonFollowIds.Count == 0)
+                return;
+            // ABI TransformDelta only carries one lerp id — push every followed pose from
+            // workspace so the whole multi-summon cluster travels together.
+            for (var i = 0; i < _summonFollowIds.Count; i++)
+                PushWorkspacePoseToFarView(_summonFollowIds[i], skipKinematicLeader: true);
+        }
+
+        /// <summary>
+        /// After kernel tick: mirror workspace poses for multi-select drag followers (Batch C).
+        /// Summon already uses <see cref="BeginSummonPoseFollow"/>; possess/ghost-drag need this
+        /// same frame because TransformDelta is single-entity.
+        /// </summary>
+        internal void SyncMultiSelectDragPosesAfterKernelTick()
+        {
+            if (!DemoActive || _bridge == null || !_bridge.IsLoaded)
+                return;
+            if (!Possessing && !GhostDragging)
+                return;
+            // Follower Unity poses follow the possessed leader in LateUpdate; kernel still
+            // mirrors the cluster via translate_selected_followers for release/coast.
+            if (_multiSelectTelekinesisActive && _multiSelectTelekinesisIds.Count > 1)
+                return;
+
+            var n = _bridge.GetSelectionIds(out var ids);
+            if (n <= 1)
+                return;
+            for (var i = 0; i < n; i++)
+                PushWorkspacePoseToFarView(ids[i], skipKinematicLeader: true);
+        }
+
+        void PushWorkspacePoseToFarView(ulong id, bool skipKinematicLeader)
+        {
+            if (id == 0 || !_glyphs.Views.TryGetValue(id, out var view) || view?.Root == null)
+                return;
+            if (skipKinematicLeader && _interaction.IsKinematicallyDriven(id))
+                return;
+            if (!TryFindItem(id, out var item))
+                return;
+            var pose = InteropStructs.ToUnityPose(item.pose);
+            view.Root.transform.SetPositionAndRotation(pose.position, pose.rotation);
+        }
+
+        /// <summary>Lock the current kernel selection set for group telekinesis (355).</summary>
+        internal void RefreshMultiSelectTelekinesisFollow()
+        {
+            _multiSelectTelekinesisIds.Clear();
+            var n = _bridge.GetSelectionIds(out var ids);
+            for (var i = 0; i < n; i++)
+            {
+                if (ids[i] != 0)
+                    _multiSelectTelekinesisIds.Add(ids[i]);
+            }
+
+            _multiSelectTelekinesisActive = _multiSelectTelekinesisIds.Count > 1;
+            _multiSelectLeaderPoseValid = false;
+            _multiSelectLeaderTrackedId = 0;
+        }
+
+        internal void ClearMultiSelectTelekinesisFollow()
+        {
+            _multiSelectTelekinesisActive = false;
+            _multiSelectTelekinesisIds.Clear();
+            _multiSelectLeaderPoseValid = false;
+            _multiSelectLeaderTrackedId = 0;
+        }
+
+        /// <summary>
+        /// During group telekinesis, do not let SyncViewsFromKernel overwrite follower transforms
+        /// with stale workspace poses (ABI publishes one kinematic delta per tick).
+        /// </summary>
+        internal bool ShouldSkipKernelViewPoseSync(ulong entityId)
+        {
+            if (!_multiSelectTelekinesisActive || entityId == 0 || (!Possessing && !GhostDragging))
+                return false;
+            if (entityId == _possessedId)
+                return true;
+            return _multiSelectTelekinesisIds.Contains(entityId);
+        }
+
+        void ApplyMultiSelectTelekinesisRigidFollow()
+        {
+            if (!_multiSelectTelekinesisActive || (!Possessing && !GhostDragging))
+            {
+                _multiSelectLeaderPoseValid = false;
+                return;
+            }
+
+            var leader = _possessedId;
+            if (leader == 0 || !_glyphs.Views.TryGetValue(leader, out var leaderView) ||
+                leaderView?.Root == null)
+            {
+                _multiSelectLeaderPoseValid = false;
+                return;
+            }
+
+            var pos = leaderView.Root.transform.position;
+            if (!_multiSelectLeaderPoseValid || _multiSelectLeaderTrackedId != leader)
+            {
+                _multiSelectLeaderTrackedId = leader;
+                _multiSelectLeaderLastWorldPos = pos;
+                _multiSelectLeaderPoseValid = true;
+                return;
+            }
+
+            var delta = pos - _multiSelectLeaderLastWorldPos;
+            _multiSelectLeaderLastWorldPos = pos;
+            if (delta.sqrMagnitude < 1e-12f)
+                return;
+
+            for (var i = 0; i < _multiSelectTelekinesisIds.Count; i++)
+            {
+                var id = _multiSelectTelekinesisIds[i];
+                if (id == leader || id == 0 ||
+                    !_glyphs.Views.TryGetValue(id, out var view) || view?.Root == null)
+                {
+                    continue;
+                }
+
+                view.Root.transform.position += delta;
+            }
+        }
+
+        private void LateUpdate()
+        {
+            if (!DemoActive)
+                return;
+            ApplyMultiSelectTelekinesisRigidFollow();
+        }
+
         internal void MarkSelectionMatsDirty() => _selectionMatsDirty = true;
 
         /// <summary>
@@ -534,13 +701,18 @@ namespace ThreeOS
 
             // Input must stay per-frame (edges / hold / drag).
             _interaction.HandleTriggerSelectAndDrag();
+            if (!GhostDragging && !Possessing) Gestures.TickSoloPostKernel();
             _multiChoice?.Tick();
             _interaction.UpdateInsertArrow();
             _fs.HandleStorageEvents();
 
-            if (_bridge.TryGetSelection(out var selectedId) && selectedId != _lastSelectionId)
+            _bridge.TryGetSelection(out var selectedId);
+            var selSig = selectedId;
+            var selCount = _bridge.GetSelectionIds(out var selArr);
+            for (var i = 0; i < selCount; i++) selSig = selSig * 1099511628211UL + selArr[i];
+            if (selSig != _lastSelectionId)
             {
-                _lastSelectionId = selectedId;
+                _lastSelectionId = selSig;
                 _selectionMatsDirty = true;
             }
 
@@ -561,7 +733,8 @@ namespace ThreeOS
                 _ghostsDirty = true;
             // Box open/close and locked anims need per-frame pose sync. Paste FS write-through
             // must NOT — that was a full SyncViewsFromKernel every frame for seconds (Quest spikes).
-            if (BoxAnimBusy || _animLockedIds.Count > 0)
+            // Multi-summon also needs per-frame sync — ABI publishes one TransformDelta at a time.
+            if (BoxAnimBusy || _animLockedIds.Count > 0 || Time.unscaledTime < _summonPoseFollowUntil)
                 _viewsDirty = true;
 
             if (_viewsDirty)
@@ -572,6 +745,8 @@ namespace ThreeOS
                 if (swSync.ElapsedMilliseconds >= 6)
                     Debug.Log($"[3OS][SYNC] SyncViewsFromKernel {swSync.ElapsedMilliseconds}ms f={Time.frameCount}");
             }
+
+            ApplySummonFollowPoses();
 
             if (_ghostsDirty)
             {
@@ -595,7 +770,7 @@ namespace ThreeOS
                 _selectionMatsDirty = false;
             }
 
-            var billboardSel = _lastSelectionId == ulong.MaxValue ? 0UL : _lastSelectionId;
+            var billboardSel = selectedId;
             _glyphs.BillboardSelectedAndVoodooLabels(billboardSel);
 
             // Catch missed dirty marks (portal open, kernel layout) without 72 Hz scans.
@@ -1388,6 +1563,8 @@ namespace ThreeOS
             _palaceClusterAnimBusy = true;
             try
             {
+                // World-rooted dismiss-X spheres must not linger inside scaling box glyphs.
+                _expanded?.TeardownAllExpandedBoxes(collapseKernel: false);
                 var clusters = BuildPalaceClusterIdLists(excludeEntityId);
                 if (clusters.Count == 0)
                     yield break;

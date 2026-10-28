@@ -47,6 +47,8 @@ namespace ThreeOS
 #endif
 
         public InteropInputFrame LastFrame { get; private set; }
+        public InteropHandSample LastLeftHand { get; private set; }
+        public InteropHandSample LastRightHand { get; private set; }
         public InteropPointCursor LastLeftCursor { get; private set; }
         public InteropPointCursor LastRightCursor { get; private set; }
         public InteropInteractionIntents LastIntents { get; private set; }
@@ -194,6 +196,7 @@ namespace ThreeOS
 
             if (handsFromTracking)
             {
+                _storage?.RunSoloDropKernelBeforeTick(ref frame, ref leftHand, ref rightHand);
                 _bridge.SetHands(ref leftHand, ref rightHand);
             }
 
@@ -201,7 +204,10 @@ namespace ThreeOS
             // frame (that used to reanchor start_hand and kill stick velocity).
 
             LastTickOk = _bridge.Tick(ref frame);
+            _storage?.SyncMultiSelectDragPosesAfterKernelTick();
             LastFrame = frame;
+            LastLeftHand = leftHand;
+            LastRightHand = rightHand;
 
             if (_bridge.NativeAbiVersion >= 5)
             {
@@ -367,11 +373,13 @@ namespace ThreeOS
 
             if (hand.GetJoint(XRHandJointID.Palm).TryGetPose(out var palmPose))
             {
-                // Meta XR Hands palm joint +Y points out the *back* of the hand (dorsal).
-                // Negate so kernel gets the palmar normal: palm to floor → world −Y → Down.
+                // OVR / Meta palm joint: +Z = fingers, +Y = dorsal. Palmar face = local −Y.
+                // Rotate the joint's local (0,-1,0) into world — do NOT use world Vector3.down.
                 var worldPalm = TrackingToWorld(palmPose.position, palmPose.rotation);
-                var n = -(worldPalm.rotation * Vector3.up);
+                var localMinusY = new Vector3(0f, -1f, 0f);
+                var n = worldPalm.rotation * localMinusY;
                 sample.palmNormal = InteropStructs.UnityToOpenXrPosition(n);
+                sample.palmPosition = InteropStructs.UnityToOpenXrPosition(worldPalm.position);
                 sample.palmModeValid = 0;
             }
 

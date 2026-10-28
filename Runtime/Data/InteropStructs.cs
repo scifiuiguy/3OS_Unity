@@ -422,10 +422,35 @@ namespace ThreeOS
         public uint secondaryPressed;
         public uint ternaryPressed;
         public ThreeOSVec3 indexProximal;
-        public uint reserved3;
-        public uint reserved4;
-        public uint reserved5;
+        /// <summary>World palm-node position (OpenXR). Used by Solo Drop palm→target.</summary>
+        public ThreeOSVec3 palmPosition;
         public uint reserved6;
+    }
+
+    /// <summary>64-byte drag multi-select box (pose yaw-only, extents full size).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropMultiSelectBox
+    {
+        public uint active;
+        public uint cumulative;
+        public ulong portalId;
+        public ThreeOSPose pose;
+        public ThreeOSVec3 extents;
+        public uint reserved0;
+        public uint reserved1; // pads to the native 64 bytes (uint64 tail alignment)
+    }
+
+    /// <summary>48-byte solo voodoo drop state.</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct InteropSoloDropState
+    {
+        public uint armed;
+        public uint hand;
+        public ulong targetId;
+        public ThreeOSVec3 farPosition;
+        public uint lastEvent;
+        public ThreeOSVec3 farExtents; /* full W×H×D; zeros ⇒ host default */
+        public uint _pad0;
     }
 
     /// <summary>32-byte point cursor probe.</summary>

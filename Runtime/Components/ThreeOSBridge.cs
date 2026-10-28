@@ -22,6 +22,9 @@ namespace ThreeOS
         private static extern uint threeos_version();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr threeos_kernel_build_stamp();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint threeos_abi_version();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
@@ -98,6 +101,13 @@ namespace ThreeOS
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_kinematics_set_params(float gain, float deadzoneM, float friction,
             float floorY);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_set_object_radius(float radiusM);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_kinematics_set_direct_follow(int enabled,
+            ref ThreeOSVec3 grabOffset);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_kinematics_possess(ulong entityId, ref ThreeOSPose objectPose);
@@ -196,6 +206,49 @@ namespace ThreeOS
         private static extern void threeos_selection_clear();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_selection_count();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_selection_get_ids([Out] ulong[] outIds, uint cap);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multiselect_begin(ref ThreeOSVec3 start, ref ThreeOSPose head,
+            uint cumulative);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multiselect_update(ref ThreeOSVec3 hand, uint cumulative);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void threeos_multiselect_end();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void threeos_multiselect_cancel();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_multiselect_get_box(out InteropMultiSelectBox box);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_solo_drop_candidates(ref ThreeOSPose head, [Out] ulong[] outIds,
+            uint cap);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void threeos_solo_drop_begin_frame();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_solo_drop_tick(uint hand, ulong clearTargetId,
+            ref ThreeOSVec3 palmNormal, uint primaryPinchPressed, uint secondaryPinchPressed,
+            ref ThreeOSPose head, ref ThreeOSVec3 handPos, float nowSeconds);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_solo_drop_get_state(out InteropSoloDropState state);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void threeos_solo_drop_cancel();
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern uint threeos_solo_blocks_voodoo_snap(float nowSeconds);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern uint threeos_sizeof_hand_sample();
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
@@ -234,6 +287,9 @@ namespace ThreeOS
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_voodoo_set_field_params(ref InteropVoodooFieldParams parameters);
+
+        [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int threeos_voodoo_set_focus_anchor_snap_enabled(int enabled);
 
         [DllImport(PluginName, CallingConvention = CallingConvention.Cdecl)]
         private static extern int threeos_voodoo_set_enclosure_boxes(
@@ -532,7 +588,8 @@ namespace ThreeOS
 
                 IsLoaded = true;
                 LastError = string.Empty;
-                Debug.Log($"[3OS] native ready version={FormatVersion(NativeVersion)} abi={NativeAbiVersion}");
+                var kernelBuild = TryReadKernelBuildStamp();
+                Debug.Log($"[3OS] native ready version={FormatVersion(NativeVersion)} abi={NativeAbiVersion} kernel_build={kernelBuild}");
             }
             catch (Exception ex)
             {
@@ -644,6 +701,33 @@ namespace ThreeOS
             catch (Exception ex) { LastError = ex.Message; return false; }
         }
 
+        /// <summary>True while Use The Force / armed solo / post-drop lockout blocks snap drag.</summary>
+        public bool SoloBlocksVoodooSnap()
+        {
+            if (!IsLoaded) return false;
+            try { return threeos_solo_blocks_voodoo_snap((float)Time.timeAsDouble) != 0; }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        /// <summary>True while either hand is in an open Snap-mode far drag (pre-park).</summary>
+        public bool IsSnapVoodooDragActive()
+        {
+            if (!IsLoaded || NativeAbiVersion < 6)
+                return false;
+            for (uint h = 0; h < 2; h++)
+            {
+                if (!TryGetVoodooSession(h, out var s) || s.open == 0)
+                    continue;
+                if (s.mode != (uint)VoodooMode.Snap)
+                    continue;
+                // Session near BB is closed for live drag; parked copies near on the portal list.
+                if (s.nearBb.open == 0)
+                    return true;
+            }
+
+            return false;
+        }
+
         public bool TryGetVoodooDragArrow(uint hand, out InteropVoodooDragArrow arrow)
         {
             arrow = default;
@@ -675,6 +759,16 @@ namespace ThreeOS
         public bool SetVoodooFieldParams(InteropVoodooFieldParams parameters) =>
             IsLoaded && NativeAbiVersion >= 6 &&
             Call(() => threeos_voodoo_set_field_params(ref parameters));
+
+        /// <summary>
+        /// Snap-mode snap nodes for NPC FocusAnchor. MR=true, Mind Palace VR=false.
+        /// </summary>
+        public bool SetFocusAnchorSnapEnabled(bool enabled)
+        {
+            if (!IsLoaded || NativeAbiVersion < 6)
+                return false;
+            return Call(() => threeos_voodoo_set_focus_anchor_snap_enabled(enabled ? 1 : 0));
+        }
 
         /// <summary>
         /// MR room AABB (OpenXR). Pass enabled=false to clear.
@@ -1070,6 +1164,20 @@ namespace ThreeOS
         public bool SetKinematicsParams(float gain, float deadzoneM, float friction, float floorY) =>
             Call(() => threeos_kinematics_set_params(gain, deadzoneM, friction, floorY));
 
+        public bool SetKinematicsObjectRadius(float radiusM) =>
+            Call(() => threeos_kinematics_set_object_radius(radiusM));
+
+        public bool SetKinematicsDirectFollow(bool enabled, ThreeOSVec3 grabOffsetOpenXr)
+        {
+            if (!enabled)
+            {
+                var zero = default(ThreeOSVec3);
+                return Call(() => threeos_kinematics_set_direct_follow(0, ref zero));
+            }
+
+            return Call(() => threeos_kinematics_set_direct_follow(1, ref grabOffsetOpenXr));
+        }
+
         public bool Possess(ulong entityId, ThreeOSPose objectPose) =>
             Call(() => threeos_kinematics_possess(entityId, ref objectPose));
 
@@ -1132,8 +1240,21 @@ namespace ThreeOS
         public void StorageClear()
         {
             if (!IsLoaded) return;
-            try { threeos_storage_clear(); }
+            try
+            {
+                threeos_storage_clear();
+                RestoreMrVoodooKernelIfNeeded();
+            }
             catch (Exception ex) { LastError = ex.Message; }
+        }
+
+        static void RestoreMrVoodooKernelIfNeeded()
+        {
+            var voodoo = FindFirstObjectByType<ThreeOSVoodooController>();
+            if (voodoo == null || !voodoo.EnclosurePublishingEnabled)
+                return;
+            FindFirstObjectByType<ThreeOSMrRoomProbe>()?.RestoreKernelMrBounds();
+            voodoo.ForceRepublishEnclosureNextFrame();
         }
 
         public bool StorageAddObject(string name, string relativePath, out ulong entityId)
@@ -1349,6 +1470,88 @@ namespace ThreeOS
             catch (Exception ex) { LastError = ex.Message; }
         }
 
+        static readonly ulong[] _selIds = new ulong[256];
+
+        /// <summary>Selected far entity ids (shared buffer; valid until next call).</summary>
+        public int GetSelectionIds(out ulong[] ids)
+        {
+            ids = _selIds;
+            if (!IsLoaded) return 0;
+            try { return (int)Math.Min(threeos_selection_get_ids(_selIds, (uint)_selIds.Length), (uint)_selIds.Length); }
+            catch (Exception ex) { LastError = ex.Message; return 0; }
+        }
+
+        public bool MultiSelectBegin(ThreeOSVec3 start, ThreeOSPose head, bool cumulative)
+        {
+            if (!IsLoaded) return false;
+            try { return threeos_multiselect_begin(ref start, ref head, cumulative ? 1u : 0u) == 0; }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public void MultiSelectUpdate(ThreeOSVec3 hand, bool cumulative)
+        {
+            if (!IsLoaded) return;
+            try { threeos_multiselect_update(ref hand, cumulative ? 1u : 0u); }
+            catch (Exception ex) { LastError = ex.Message; }
+        }
+
+        public void MultiSelectEnd(bool cancel)
+        {
+            if (!IsLoaded) return;
+            try { if (cancel) threeos_multiselect_cancel(); else threeos_multiselect_end(); }
+            catch (Exception ex) { LastError = ex.Message; }
+        }
+
+        public bool TryGetMultiSelectBox(out InteropMultiSelectBox box)
+        {
+            box = default;
+            if (!IsLoaded) return false;
+            try { return threeos_multiselect_get_box(out box) == 0 && box.active != 0; }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public int SoloDropCandidates(ThreeOSPose head, ulong[] outIds)
+        {
+            if (!IsLoaded) return 0;
+            try { return (int)threeos_solo_drop_candidates(ref head, outIds, (uint)outIds.Length); }
+            catch (Exception ex) { LastError = ex.Message; return 0; }
+        }
+
+        public void SoloDropBeginFrame()
+        {
+            if (!IsLoaded) return;
+            try { threeos_solo_drop_begin_frame(); }
+            catch (Exception ex) { LastError = ex.Message; }
+        }
+
+        /// <summary>Returns 0 none, 1 armed, 2 dismissed, 3 dropped, 4 selected (armed solo).</summary>
+        public uint SoloDropTick(int hand, ulong clearTarget, ThreeOSVec3 palmNormal, bool primaryPinch,
+            bool secondaryPinch, ThreeOSPose head, ThreeOSVec3 handPos, float nowSeconds)
+        {
+            if (!IsLoaded) return 0;
+            try
+            {
+                return threeos_solo_drop_tick((uint)hand, clearTarget, ref palmNormal,
+                    primaryPinch ? 1u : 0u, secondaryPinch ? 1u : 0u, ref head, ref handPos, nowSeconds);
+            }
+            catch (Exception ex) { LastError = ex.Message; return 0; }
+        }
+
+        public bool TryGetSoloDropState(out InteropSoloDropState state)
+        {
+            state = default;
+            if (!IsLoaded) return false;
+            try { return threeos_solo_drop_get_state(out state) == 0; }
+            catch (Exception ex) { LastError = ex.Message; return false; }
+        }
+
+        public void SoloDropCancel()
+        {
+            if (!IsLoaded) return;
+            try { threeos_solo_drop_cancel(); }
+            catch (Exception ex) { LastError = ex.Message; }
+        }
+
         public bool SetDriveRoots(InteropDriveRoot[] roots) =>
             Call(() => threeos_drive_roots_set(roots ?? Array.Empty<InteropDriveRoot>(),
                 (uint)(roots?.Length ?? 0)));
@@ -1449,6 +1652,19 @@ namespace ThreeOS
 
         public bool FieldResolveOverlaps(ThreeOSPose head) =>
             Call(() => threeos_field_resolve_overlaps(ref head));
+
+        static string TryReadKernelBuildStamp()
+        {
+            try
+            {
+                var p = threeos_kernel_build_stamp();
+                return p == IntPtr.Zero ? "(missing)" : Marshal.PtrToStringAnsi(p) ?? "(empty)";
+            }
+            catch (Exception ex)
+            {
+                return $"(no stamp: {ex.GetType().Name})";
+            }
+        }
 
         public static string FormatVersion(uint packed)
         {
