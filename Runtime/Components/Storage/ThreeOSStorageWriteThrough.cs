@@ -8,6 +8,11 @@ namespace ThreeOS
 {
     internal sealed class ThreeOSStorageWriteThrough
     {
+        /// <summary>Box open/close bump around paste (half of up+down). 336: 0.008; 358: 0.004.</summary>
+        const float PasteBoxBumpHalfSec = 0.004f;
+        /// <summary>Kernel ack phase does not advance the bar (was mistaken for a second fast bar).</summary>
+        const float PasteBarPrepSlice = 0f;
+
         private readonly ThreeOSStorageController _host;
         internal ThreeOSStorageWriteThrough(ThreeOSStorageController host) { _host = host; }
 
@@ -146,7 +151,10 @@ namespace ThreeOS
 
                     _pasteBatchCompleted = 0;
                     _pasteBatchKnownTotal = 1;
+                    // Spread teardown / box-open off the pinch-release frame (Quest hitch).
+                    yield return null;
                     TeardownAllExpandedBoxes(collapseKernel: true);
+                    yield return null;
 
                     Transform bumpT = null;
                     if (_views.TryGetValue(ev.boxId, out var boxView) && boxView.Root != null)
@@ -171,7 +179,7 @@ namespace ThreeOS
                         _pasteBar.ShowAt(bumpT, bumpT.up * 0.12f);
                         _bridge.SetBoxOpen(ev.boxId, true);
                         var baseScale = bumpT.localScale;
-                        yield return AnimateScaleBump(bumpT, baseScale, 1.08f, 0.04f);
+                        yield return AnimateScaleBump(bumpT, baseScale, 1.08f, PasteBoxBumpHalfSec);
                         _bridge.SetBoxOpen(ev.boxId, false);
                     }
                     else
@@ -237,7 +245,7 @@ namespace ThreeOS
                 }
 
                 _pasteBatchCompleted++;
-                RefreshPasteBarProgress(itemFraction: 1f);
+                RefreshPasteBarPrepProgress();
             }
             finally
             {
@@ -251,36 +259,26 @@ namespace ThreeOS
                 if (_bridge.TryPollStorageEvent(out var next) && next.type != 0 && next.awaitingAck != 0)
                 {
                     _pasteBatchKnownTotal = Mathf.Max(_pasteBatchKnownTotal, _pasteBatchCompleted + 1);
-                    RefreshPasteBarProgress(itemFraction: 0f);
                     yield return null;
                     yield return InsertSequence(next, isContinuation: true);
                 }
                 else
                 {
                     // All kernel events acked — drain disk cuts off the main thread.
+                    yield return null;
                     yield return DrainPendingFsCutsRoutine();
                     _pasteBar?.SetProgress(1f);
-                    yield return null;
-                    // Hide bar before heal/sync — Documents listing was the 100% FPS spike.
                     _pasteBar?.Hide();
-                    // Give Meta Start a few clean frames before any Documents JNI / SyncViews.
-                    yield return null;
-                    yield return null;
-                    yield return null;
                     if (_lastPasteBatch.Count > 0)
                     {
                         _host.InvalidatePalaceNamePrecache();
-                        // Spread heal across frames so the bar-complete frame stays light.
                         yield return _host.RequestPostPasteChildHealRoutine();
                     }
 
-                    // Heal adds inField=false kids; defer dirty so SyncViews is not same-frame as heal.
-                    yield return null;
-                    yield return null;
                     _host.MarkViewsDirty();
                     if (_host.HasVoodooPortals)
                         _host.MarkGhostsDirty();
-                    _host.SuppressSafetyReconcileFor(0.6f);
+                    _host.SuppressSafetyReconcileFor(0.2f);
                 }
             }
             finally
@@ -294,12 +292,21 @@ namespace ThreeOS
 
         /// <summary>
         /// Process queued folder/file cuts on the ThreadPool one-at-a-time.
-        /// Folder NIO/JNI runs via <see cref="ThreeOSAndroidStorage.RunWithJni"/> so the
-        /// Unity main thread only polls progress (no ~80–100ms stalls per folder).
+        /// Parallel JNI folder moves caused a hard FPS dip when the bar started (358).
         /// </summary>
         IEnumerator DrainPendingFsCutsRoutine()
         {
-            _pasteCopyProgress = new BgCopyProgress();
+            var fsJobCount = 0;
+            lock (_pendingFsLock)
+            {
+                fsJobCount = _pendingFsCuts.Count;
+            }
+
+            if (fsJobCount == 0)
+                yield break;
+
+            _pasteBar?.SetProgress(0f);
+
             while (true)
             {
                 PendingFsCut job;
@@ -312,7 +319,8 @@ namespace ThreeOS
 
                 var bg = new BgInsertState();
                 var jobCap = job;
-                var progress = _pasteCopyProgress;
+                var progress = new BgCopyProgress();
+                _pasteCopyProgress = progress;
 
                 System.Threading.ThreadPool.QueueUserWorkItem(_ =>
                 {
@@ -323,7 +331,6 @@ namespace ThreeOS
                             progress.totalFiles = Mathf.Max(1, progress.totalFiles);
                             if (jobCap.IsFolder)
                             {
-                                // Documents folders need Java NIO; managed Move usually fails.
                                 bg.ok = TryCutRelFolderCross(jobCap.SrcRoot, jobCap.SourceRel,
                                     jobCap.DstRoot, jobCap.DestRel, progress);
                                 if (bg.ok)
@@ -383,7 +390,7 @@ namespace ThreeOS
                         total = Mathf.Max(1, _pendingFsTotal);
                     }
 
-                    _pasteBar?.SetProgress(Mathf.Clamp01((done + 0.5f) / total));
+                    UpdatePasteBarTransferProgress(done, total, progress);
                     waited += Time.unscaledDeltaTime;
                     if (waited - lastStallLog >= 30f)
                     {
@@ -402,7 +409,7 @@ namespace ThreeOS
                     _pendingFsDone++;
                     if (!bg.ok)
                         _pendingFsFailed++;
-                    _pasteBar?.SetProgress(Mathf.Clamp01(_pendingFsDone / (float)Mathf.Max(1, _pendingFsTotal)));
+                    UpdatePasteBarTransferProgress(_pendingFsDone, Mathf.Max(1, _pendingFsTotal), null);
                 }
             }
 
@@ -437,15 +444,34 @@ namespace ThreeOS
             _pasteBar?.Hide();
         }
 
-        void RefreshPasteBarProgress(float itemFraction)
+        /// <summary>Kernel reparent acks only — small prep slice (not a full bar sweep).</summary>
+        void RefreshPasteBarPrepProgress()
         {
             if (_pasteBar == null)
                 return;
-            // knownTotal grows as the queue drains; denominator is always "done so far + remaining known".
-            var total = Mathf.Max(_pasteBatchKnownTotal, _pasteBatchCompleted + 1);
-            var done = Mathf.Max(0, _pasteBatchCompleted);
-            var t = (done + Mathf.Clamp01(itemFraction)) / total;
-            _pasteBar.SetProgress(Mathf.Clamp01(t));
+            var total = Mathf.Max(1, _pasteBatchKnownTotal);
+            var u = Mathf.Clamp01(_pasteBatchCompleted / (float)total);
+            _pasteBar.SetProgress(Mathf.Clamp01(u * PasteBarPrepSlice));
+        }
+
+        /// <summary>
+        /// FS transfer fill: prep slice + per-file progress from the active cut job.
+        /// </summary>
+        void UpdatePasteBarTransferProgress(int fsJobsDone, int fsJobTotal, BgCopyProgress activeJob)
+        {
+            if (_pasteBar == null)
+                return;
+            var denom = Mathf.Max(1, fsJobTotal);
+            var jobFrac = 0f;
+            if (activeJob != null)
+            {
+                jobFrac = activeJob.totalFiles > 0
+                    ? activeJob.Fraction
+                    : 0.12f; // rename/move in flight before file totals are known
+            }
+
+            var transfer = Mathf.Clamp01((fsJobsDone + jobFrac) / denom);
+            _pasteBar.SetProgress(Mathf.Clamp01(PasteBarPrepSlice + (1f - PasteBarPrepSlice) * transfer));
         }
 
         /// <summary>
@@ -743,7 +769,7 @@ namespace ThreeOS
             var waited = 0f;
             while (!bg.done && waited < 45f)
             {
-                RefreshPasteBarProgress(progress.Fraction);
+                UpdatePasteBarTransferProgress(0, 1, progress);
                 waited += Time.unscaledDeltaTime;
                 yield return null;
             }
@@ -829,45 +855,24 @@ namespace ThreeOS
                 return false;
             }
 
+            if (ThreeOSAndroidStorage.SameVolumeForRename(src, dst) &&
+                TryRelocateFolderTree(src, dst, progress))
+                return true;
+
+            if (TryFastFolderTreeCopy(src, dst, progress))
+                return true;
+
             try
             {
-                if (Directory.Exists(dst))
-                    Directory.Delete(dst, true);
-            }
-            catch { /* best-effort */ }
-
-            var moveThrew = false;
-            try
-            {
-                Directory.Move(src, dst);
-            }
-            catch (System.Exception ex)
-            {
-                moveThrew = true;
-                Debug.LogWarning("[3OS] managed folder move " + src + " → " + dst + ": " + ex.Message);
-            }
-
-            // Quest MTP often still reports src after a successful Move. If dest is present,
-            // treat as success — never delete dest on a false-negative verify (that caused
-            // disk-ok / kernel-ack(false) desync: empty DemonProject in-scene, full on disk).
-            if (!moveThrew && ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst))
-            {
-                if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(src))
+                if (progress != null)
                 {
-                    try { Directory.Delete(src, true); } catch { /* MTP ghost */ }
+                    progress.totalFiles = 1;
+                    progress.doneFiles = 0;
                 }
 
-                MarkFolderCutProgressDone(progress);
-                return true;
-            }
-
-            try
-            {
-                if (progress != null && progress.totalFiles <= 0)
-                    progress.totalFiles = Mathf.Max(1, CountFilesRecursive(src));
                 CopyDirectoryRecursive(src, dst, progress);
                 try { Directory.Delete(src, true); } catch { /* best-effort */ }
-                if (ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst))
+                if (FolderCutDestReady(dst))
                 {
                     MarkFolderCutProgressDone(progress);
                     return true;
@@ -924,73 +929,41 @@ namespace ThreeOS
                 return false;
             }
 
-            TryRemoveDirectoryBestEffort(dst);
+            var sameVol = ThreeOSAndroidStorage.SameVolumeForRename(src, dst);
+            ThreeOSAndroidStorage.AppendPasteFsLog($"sameVol={sameVol} {src} → {dst}");
 
-            // NIO once landed Test12 as a dir; Os.rename + ProcessBuilder sh mv next;
-            // Runtime.exec(String[]) was the wrong overload and could stick insertAnimBusy.
-            var moved = ThreeOSAndroidStorage.JavaNioMove(src, dst);
-            ThreeOSAndroidStorage.AppendPasteFsLog($"NIO={moved} {src}");
-            if (!moved)
+            if (sameVol && TryRelocateFolderTree(src, dst, progress))
             {
-                moved = ThreeOSAndroidStorage.OsRename(src, dst);
-                ThreeOSAndroidStorage.AppendPasteFsLog($"OsRename={moved}");
+                ThreeOSAndroidStorage.AppendPasteFsLog($"folder OK {destRel}");
+                return true;
             }
 
-            if (!moved)
+            if (TryFastFolderTreeCopy(src, dst, progress))
             {
-                moved = ThreeOSAndroidStorage.ShellMv(src, dst);
-                ThreeOSAndroidStorage.AppendPasteFsLog($"ShellMv={moved}");
+                ThreeOSAndroidStorage.AppendPasteFsLog($"folder fast-copy OK {destRel}");
+                return true;
             }
 
-            if (!moved)
-            {
-                moved = ThreeOSAndroidStorage.JavaRename(src, dst);
-                ThreeOSAndroidStorage.AppendPasteFsLog($"renameTo={moved}");
-            }
-
-            if (moved)
-            {
-                if (FolderDestLanded(src, dst))
-                {
-                    MarkFolderCutProgressDone(progress);
-                    ThreeOSAndroidStorage.AppendPasteFsLog($"folder OK {destRel}");
-                    return true;
-                }
-
-                Debug.LogWarning("[3OS] Java folder move reported OK but verify failed " + src + " → " + dst);
-                ThreeOSAndroidStorage.AppendPasteFsLog($"verify fail {src} → {dst}");
-            }
-
+            // Last resort: per-file JNI / managed (slow on large Demo trees).
             try
             {
-                Directory.Move(src, dst);
-                if (FolderDestLanded(src, dst))
+                ThreeOSAndroidStorage.AppendPasteFsLog("folder JavaCopyDirectory fallback");
+                if (progress != null)
                 {
-                    MarkFolderCutProgressDone(progress);
-                    return true;
+                    progress.totalFiles = 1;
+                    progress.doneFiles = 0;
                 }
 
-                Debug.LogWarning("[3OS] Directory.Move returned without relocating " + src + " → " + dst);
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogWarning("[3OS] folder move " + src + " → " + dst + ": " + ex.Message + "; copy+delete");
-            }
-
-            try
-            {
-                if (progress != null && progress.totalFiles <= 0)
-                    progress.totalFiles = Mathf.Max(1, CountFilesRecursive(src));
-                if (!ThreeOSAndroidStorage.JavaCopyDirectory(src, dst))
+                System.Action onLeaf = () => NoteCopyFileProgress(progress);
+                if (!ThreeOSAndroidStorage.JavaCopyDirectory(src, dst, onLeaf))
                     CopyDirectoryRecursive(src, dst, progress);
                 else if (progress != null)
                     MarkFolderCutProgressDone(progress);
-                TryRemoveDirectoryBestEffort(src);
-                if (FolderDestLanded(src, dst))
+
+                ScrubFolderCutSourceGhost(src);
+                if (FolderCutDestReady(dst))
                     return true;
 
-                // Dest missing — real failure. Never delete a present dest because MTP still
-                // lists src (that wiped successful pastes and remounted Demo/Demo2 in place).
                 Debug.LogError("[3OS] folder cut incomplete (dest missing) " + src + " → " + dst);
                 return false;
             }
@@ -999,6 +972,20 @@ namespace ThreeOS
                 Debug.LogError("[3OS] folder copy failed " + src + " → " + dst + ": " + ex.Message);
                 return false;
             }
+        }
+
+        bool TryFastFolderTreeCopy(string src, string dst, BgCopyProgress progress)
+        {
+            TryRemoveDirectoryBestEffort(dst);
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (ThreeOSAndroidStorage.ShellCpTree(src, dst))
+            {
+                MarkFolderCutProgressDone(progress);
+                ScrubFolderCutSourceGhost(src);
+                return FolderCutDestReady(dst);
+            }
+#endif
+            return false;
         }
 
         /// <summary>
@@ -1139,6 +1126,105 @@ namespace ThreeOS
             progress.doneFiles = progress.totalFiles;
         }
 
+        static bool FolderCutDestReady(string dst) =>
+            ThreeOSDemoRootBootstrap.DirectoryLooksPresent(dst) ||
+            ThreeOSAndroidStorage.Exists(dst);
+
+        static void ScrubFolderCutSourceGhost(string src)
+        {
+            if (string.IsNullOrEmpty(src))
+                return;
+            TryRemoveDirectoryBestEffort(src);
+            ThreeOSAndroidStorage.ShellRm(src);
+            ThreeOSAndroidStorage.JavaDeleteRecursive(src);
+        }
+
+        static void NoteCopyFileProgress(BgCopyProgress progress)
+        {
+            if (progress == null)
+                return;
+            progress.doneFiles++;
+            progress.totalFiles = Mathf.Max(progress.totalFiles, progress.doneFiles + 1);
+        }
+
+        /// <summary>
+        /// Same-volume tree relocate (no copy). Quest Documents: <see cref="ThreeOSAndroidStorage.ShellMv"/> first.
+        /// Dest present = success even when MTP still lists src (scrub ghost; never fall through to copy).
+        /// </summary>
+        bool TryRelocateFolderTree(string src, string dst, BgCopyProgress progress)
+        {
+            if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(dst))
+                return false;
+            if (string.Equals(src, dst, System.StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (FolderCutDestReady(dst))
+            {
+                MarkFolderCutProgressDone(progress);
+                ScrubFolderCutSourceGhost(src);
+                return true;
+            }
+
+            TryRemoveDirectoryBestEffort(dst);
+
+            var moveAttempted = false;
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (ThreeOSAndroidStorage.ShellMv(src, dst))
+                moveAttempted = true;
+            else if (ThreeOSAndroidStorage.JavaNioMove(src, dst))
+                moveAttempted = true;
+            else if (ThreeOSAndroidStorage.OsRename(src, dst))
+                moveAttempted = true;
+            else if (ThreeOSAndroidStorage.JavaRename(src, dst))
+                moveAttempted = true;
+#else
+            if (ThreeOSAndroidStorage.JavaNioMove(src, dst))
+                moveAttempted = true;
+            else if (ThreeOSAndroidStorage.OsRename(src, dst))
+                moveAttempted = true;
+            else if (ThreeOSAndroidStorage.ShellMv(src, dst))
+                moveAttempted = true;
+            else if (ThreeOSAndroidStorage.JavaRename(src, dst))
+                moveAttempted = true;
+#endif
+
+            if (!moveAttempted)
+            {
+                try
+                {
+                    Directory.Move(src, dst);
+                    moveAttempted = true;
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning("[3OS] folder Directory.Move " + src + " → " + dst + ": " + ex.Message);
+                }
+            }
+
+            if (!FolderCutDestReady(dst))
+            {
+                ThreeOSAndroidStorage.AppendPasteFsLog(
+                    $"relocate fail moveAttempted={moveAttempted} dstReady=false");
+                return false;
+            }
+
+            MarkFolderCutProgressDone(progress);
+            ScrubFolderCutSourceGhost(src);
+            ThreeOSAndroidStorage.AppendPasteFsLog(
+                moveAttempted ? $"folder relocate OK {src} → {dst}" : $"folder dest ready {dst}");
+            return true;
+        }
+
+        static void CopyFileBuffered(string src, string dst)
+        {
+            const int bufferBytes = 1024 * 1024;
+            using var input = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read, bufferBytes,
+                FileOptions.SequentialScan);
+            using var output = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None, bufferBytes,
+                FileOptions.SequentialScan);
+            input.CopyTo(output, bufferBytes);
+        }
+
         static void TryRemoveDirectoryBestEffort(string path)
         {
             if (string.IsNullOrEmpty(path))
@@ -1263,7 +1349,7 @@ namespace ThreeOS
                     yield break;
                 }
 
-                e += Time.deltaTime;
+                e += Time.unscaledDeltaTime;
                 var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(e / halfDuration));
                 t.localScale = baseScale * Mathf.Lerp(1f, peak, u);
                 yield return null;
@@ -1277,7 +1363,7 @@ namespace ThreeOS
                     yield break;
                 }
 
-                e += Time.deltaTime;
+                e += Time.unscaledDeltaTime;
                 var u = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(e / halfDuration));
                 t.localScale = baseScale * Mathf.Lerp(peak, 1f, u);
                 yield return null;
@@ -1471,9 +1557,9 @@ namespace ThreeOS
             foreach (var file in Directory.GetFiles(src))
             {
                 var name = Path.GetFileName(file);
-                File.Copy(file, Path.Combine(dst, name), true);
+                CopyFileBuffered(file, Path.Combine(dst, name));
                 if (progress != null)
-                    progress.doneFiles++;
+                    NoteCopyFileProgress(progress);
             }
 
             foreach (var dir in Directory.GetDirectories(src))

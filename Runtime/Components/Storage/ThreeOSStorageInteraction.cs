@@ -115,13 +115,22 @@ namespace ThreeOS
                 _triggerDownCursorValid = true;
                 var chromeThisHand = (_selectHand == 0 && leftChrome) ||
                                      (_selectHand == 1 && rightChrome);
-                if (chromeThisHand || _host.Dismiss.TryBeginCloseOnXHover())
+                if (chromeThisHand || _host.Gestures.SoloArmed || _host.Dismiss.TryBeginCloseOnXHover())
                 {
                     _triggerGestureConsumed = true;
                 }
             }
 
             var aimUnity = SelectAimUnity(_selectHand, out var rayDir);
+
+            if (_bridge.IsSnapVoodooDragActive() && _host.Gestures.BoxActive)
+                _host.Gestures.EndBox(true);
+
+            if (_host.Gestures.BoxActive)
+            {
+                if (triggerDown) _host.Gestures.UpdateBox(SelectHandCursorOpenXr(), OppositeTernary());
+                else _host.Gestures.EndBox(false);
+            }
 
             if (triggerDown && _triggerWasDown && !_triggerDragActive && !_possessing &&
                 !_ghostDragging && !_triggerGestureConsumed)
@@ -168,13 +177,25 @@ namespace ThreeOS
                             TryFindItem(hitId, out var hitItem) &&
                             (hitItem.kind == 0 || hitItem.kind == 1))
                         {
-                            if (hitId != selectedId && _bridge.SetSelection(hitId))
+                            if (hitId != selectedId)
                             {
-                                _selectionLabel = hitItem.Name;
-                                _status = $"Sel:{_selectionLabel}";
+                                // Multi-select: keep the set when grabbing any member under cursor.
+                                if (!IsEntityInSelection(hitId) &&
+                                    _bridge.SetSelection(hitId))
+                                {
+                                    _selectionLabel = hitItem.Name;
+                                    _status = $"Sel:{_selectionLabel}";
+                                }
                             }
 
                             dragId = hitId;
+                        }
+                        else if (!_bridge.IsSnapVoodooDragActive() && !_host.Gestures.SoloArmed &&
+                                 (selectedId == 0 || OppositeTernary()))
+                        {
+                            _host.Gestures.BeginBox(SelectHandCursorOpenXr(), frame.head, OppositeTernary());
+                            if (_host.Gestures.BoxActive)
+                                _triggerGestureConsumed = true;
                         }
                         else if (selectedId != 0)
                         {
@@ -327,7 +348,10 @@ namespace ThreeOS
                         _selectionLabel = "none";
                         _status = $"cut paste → {pasteBox.Name}";
                         _lastShortTapId = 0;
+                        // Rebuild ghosts same frame — wiping without MarkGhostsDirty dropped the
+                        // destination folder's near ghost while the far loading bar still showed.
                         _host.Glyphs.ClearGhostViews();
+                        _host.MarkGhostsDirty();
                         _host.MarkViewsDirty();
                     }
                     else
@@ -395,12 +419,33 @@ namespace ThreeOS
                     return;
                 }
 
+                // Capture the full selection BEFORE summon — kernel expands from this set.
+                var selN = _bridge.GetSelectionIds(out var selIds);
+                var summonIds = new ulong[Mathf.Max(selN, 1)];
+                if (selN > 0)
+                    System.Array.Copy(selIds, summonIds, selN);
+                else
+                {
+                    summonIds[0] = selectedId;
+                    selN = 1;
+                }
+
+                // If any selected id still has a ghost portal, treat as summon-home (not near-real
+                // deselect) — multi-select primary may briefly report homePortal==0.
+                var anyGhostHome = homePortal;
+                if (anyGhostHome == 0)
+                {
+                    for (var i = 0; i < selN; i++)
+                    {
+                        var p = _bridge.PortalForGhost(summonIds[i]);
+                        if (p != 0) { anyGhostHome = p; break; }
+                    }
+                }
+
                 // Near-field selection (post-summon or matrix real): open-air empty
                 // pinch deselects. Do not re-summon to the pinch — that left selection
                 // permanently sticky because every miss called summon again.
-                // After Dismiss All, portals are gone so homePortal reads 0 — that must
-                // NOT look like near-field empty deselect (see keep-selection window).
-                if (homePortal == 0 && portalAtPinch == 0)
+                if (anyGhostHome == 0 && portalAtPinch == 0)
                 {
                     _bridge.ClearSelection();
                     _selectionLabel = "none";
@@ -412,19 +457,16 @@ namespace ThreeOS
                 // Ghost outside / cross-portal, or near-real into a BB → summon/insert + lerp.
                 if (_bridge.VoodooSummon(selectedId, pinchXr))
                 {
-                    if (homePortal == 0 && portalAtPinch != 0)
-                    {
-                        _status = "insert → far (lerp)";
-                    }
-                    else if (portalAtPinch != 0 && portalAtPinch != homePortal)
-                    {
-                        _status = "summon cross-portal (lerp)";
-                    }
+                    if (anyGhostHome == 0 && portalAtPinch != 0)
+                        _status = selN > 1 ? $"insert ×{selN} → far" : "insert → far (lerp)";
+                    else if (portalAtPinch != 0 && portalAtPinch != anyGhostHome)
+                        _status = selN > 1 ? $"summon ×{selN} cross-portal" : "summon cross-portal (lerp)";
                     else
-                    {
-                        _status = "summon near-field (lerp)";
-                    }
+                        _status = selN > 1 ? $"summon ×{selN} near-field" : "summon near-field (lerp)";
 
+                    _host.MarkGhostsDirty();
+                    _host.BeginSummonPoseFollow(summonIds, selN);
+                    _host.MarkViewsDirty();
                     _lastShortTapId = 0;
                     return;
                 }
@@ -536,6 +578,7 @@ namespace ThreeOS
             _possessing = false;
             _possessedId = 0;
             _triggerDragActive = false;
+            _host.ClearMultiSelectTelekinesisFollow();
             _host.MarkStorageVisualsDirty();
         }
 
@@ -562,6 +605,7 @@ namespace ThreeOS
 
                 _ghostDragging = false;
                 _triggerDragActive = false;
+                _host.ClearMultiSelectTelekinesisFollow();
                 _host.MarkStorageVisualsDirty();
                 return;
             }
@@ -570,6 +614,14 @@ namespace ThreeOS
             {
                 ReleasePossessedFromTrigger();
             }
+        }
+
+        bool OppositeTernary()
+        {
+            var flags = (ButtonFlags)_input.LastFrame.buttonFlags;
+            return _selectHand == 0
+                ? (flags & ButtonFlags.RightTernary) != 0
+                : (flags & ButtonFlags.LeftTernary) != 0;
         }
 
         internal Vector3 SelectHandCursorOpenXr()
@@ -600,39 +652,77 @@ namespace ThreeOS
                 return;
             }
 
-            var cursorXr = SelectHandCursorOpenXr();
-            var homePortal = _bridge.PortalForGhost(selectedId);
-            var portalAtCursor = _bridge.PortalAtNearPoint(cursorXr);
+            TrySetKinClampRadiusForEntity(selectedId);
 
-            // Committed ghost inside home BB → ghost-scale drag.
-            // Near-field real (no ghost) → audition drag (kernel handles enter/exit BB).
-            // Committed ghost outside home BB → far telekinesis of the real.
-            if (homePortal != 0 && portalAtCursor == homePortal)
+            // Kernel drag handles direct in-glyph telekinesis and velocity stick; only fall
+            // back to possess when begin refuses (should be rare after far-field audition fix).
+            if (_bridge.GhostDragBegin((uint)_selectHand, selectedId))
             {
-                if (_bridge.GhostDragBegin((uint)_selectHand, selectedId))
-                {
-                    _ghostDragging = true;
-                    _possessedId = selectedId;
-                    _status = "ghost drag — blue stick";
-                    return;
-                }
+                _ghostDragging = true;
+                _possessedId = selectedId;
+                _host.RefreshMultiSelectTelekinesisFollow();
+                var portalAtCursor = _bridge.PortalAtNearPoint(SelectHandCursorOpenXr());
+                _status = portalAtCursor != 0
+                    ? "telekinesis — near BB"
+                    : "telekinesis — direct if in glyph, else stick";
+                return;
             }
 
-            if (homePortal == 0)
+            TryPossessEntity(selectedId, aimUnity);
+        }
+
+        bool IsEntityInSelection(ulong entityId)
+        {
+            if (entityId == 0) return false;
+            var n = _bridge.GetSelectionIds(out var ids);
+            for (var i = 0; i < n; i++)
             {
-                if (_bridge.GhostDragBegin((uint)_selectHand, selectedId))
-                {
-                    _ghostDragging = true;
-                    _possessedId = selectedId;
-                    // Kernel picks direct (cursor-in-glyph) vs velocity stick for near-field.
-                    _status = portalAtCursor != 0
-                        ? "audition insert — ghost in BB"
-                        : "near drag — direct if in glyph, else stick";
-                    return;
-                }
+                if (ids[i] == entityId) return true;
             }
 
-            TryPossessNearest(aimUnity);
+            return false;
+        }
+
+        const float DirectTelekinesisGrabRadiusM = 0.09f;
+
+        void TrySetDirectFollowForPossess(ThreeOSPose objectPoseOpenXr)
+        {
+            if (_selectHand < 0)
+            {
+                _bridge.SetKinematicsDirectFollow(false, default);
+                return;
+            }
+
+            var hand = SelectHandCursorOpenXr();
+            var dx = objectPoseOpenXr.position.x - hand.x;
+            var dy = objectPoseOpenXr.position.y - hand.y;
+            var dz = objectPoseOpenXr.position.z - hand.z;
+            var dist = Mathf.Sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist <= DirectTelekinesisGrabRadiusM)
+            {
+                var offset = new ThreeOSVec3 { x = dx, y = dy, z = dz };
+                _bridge.SetKinematicsDirectFollow(true, offset);
+            }
+            else
+            {
+                _bridge.SetKinematicsDirectFollow(false, default);
+            }
+        }
+
+        void TrySetKinClampRadiusForEntity(ulong entityId)
+        {
+            if (entityId == 0 || !_views.TryGetValue(entityId, out var view) || view?.Movable == null ||
+                view.Root == null || !view.Root.activeInHierarchy)
+            {
+                return;
+            }
+
+            var half = Mathf.Max(0.04f, view.Movable.HalfExtent);
+            if (_bridge.SetKinematicsObjectRadius(half))
+            {
+                Debug.Log(
+                    $"[3OS][KinClamp] SetKinematicsObjectRadius half_m={half:F3} entity={entityId}");
+            }
         }
 
         internal bool PossessForSelectHand(ulong entityId, ThreeOSPose objectPose)
@@ -665,7 +755,7 @@ namespace ThreeOS
             return (PalmMode)_input.LastIntents.palmMode;
         }
 
-        internal void TryPossessNearest(Vector3 aimUnity)
+        internal void TryPossessEntity(ulong entityId, Vector3 aimUnity)
         {
             // Clear a stuck FS event so a prior failed insert cannot block the next grab/commit.
             if (!_insertAnimBusy &&
@@ -676,11 +766,14 @@ namespace ThreeOS
                 _bridge.AckStorageEvent(false);
             }
 
-            _bridge.TryGetSelection(out var selectedId);
+            if (entityId == 0)
+            {
+                _bridge.TryGetSelection(out entityId);
+            }
 
             // Selection-gated only — never possess a deselected / nearest glyph.
-            if (selectedId == 0 ||
-                !TryFindItem(selectedId, out var selectedItem) ||
+            if (entityId == 0 || !IsEntityInSelection(entityId) ||
+                !TryFindItem(entityId, out var selectedItem) ||
                 (selectedItem.kind != 0 && selectedItem.kind != 1))
             {
                 _status = "grab requires selection";
@@ -690,17 +783,21 @@ namespace ThreeOS
             // Prefer live view pose; fall back to kernel workspace pose when the far glyph
             // is missing/inactive so outside-home velocity still engages for ghosts.
             ThreeOSPose possessPose = selectedItem.pose;
-            if (_views.TryGetValue(selectedId, out var selectedView) &&
-                selectedView.Root != null && selectedView.Root.activeInHierarchy &&
+            _views.TryGetValue(entityId, out var selectedView);
+            if (selectedView != null && selectedView.Root != null && selectedView.Root.activeInHierarchy &&
                 selectedView.Movable != null)
             {
                 possessPose = selectedView.Movable.CurrentOpenXrPose();
+                TrySetKinClampRadiusForEntity(entityId);
             }
 
-            if (PossessForSelectHand(selectedId, possessPose))
+            TrySetDirectFollowForPossess(possessPose);
+
+            if (PossessForSelectHand(entityId, possessPose))
             {
                 _possessing = true;
-                _possessedId = selectedId;
+                _possessedId = entityId;
+                _host.RefreshMultiSelectTelekinesisFollow();
                 _status = selectedItem.kind == 1
                     ? "far possess folder — stick drag"
                     : "far possess — drag onto a folder";

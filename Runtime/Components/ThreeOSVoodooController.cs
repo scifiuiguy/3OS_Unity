@@ -31,6 +31,7 @@ namespace ThreeOS
         private readonly List<LineRenderer> _portalNearLr = new List<LineRenderer>();
         private readonly List<Collider> _worldMeshColliders = new List<Collider>();
         private float _nextMeshRefresh = -1f;
+        private int _lastEnclosurePublishCount = -1;
         private readonly List<InteropVoodooEnclosureBox> _boxScratch =
             new List<InteropVoodooEnclosureBox>(MaxEnclosureBoxes);
 
@@ -142,7 +143,23 @@ namespace ThreeOS
             }
 
             if (!active && _bridge != null && _bridge.IsLoaded && _bridge.NativeAbiVersion >= 6)
+            {
                 _bridge.SetVoodooEnclosureBoxes(null);
+                return;
+            }
+
+            if (active)
+            {
+                _nextMeshRefresh = 0f;
+                FindFirstObjectByType<ThreeOSMrRoomProbe>()?.RestoreKernelMrBounds();
+            }
+        }
+
+        /// <summary>Force enclosure publish on next Update (after storage_clear / MR return).</summary>
+        public void ForceRepublishEnclosureNextFrame()
+        {
+            _nextMeshRefresh = 0f;
+            RefreshWorldMeshColliders();
         }
 
         private void PublishWorldMeshBoxes()
@@ -183,7 +200,14 @@ namespace ThreeOS
                     break;
             }
 
-            if (_boxScratch.Count == 0)
+            var publishCount = _boxScratch.Count;
+            if (publishCount != _lastEnclosurePublishCount)
+            {
+                _lastEnclosurePublishCount = publishCount;
+                Debug.Log($"[3OS][KinClamp] Publish WorldMesh enclosure boxes={publishCount}");
+            }
+
+            if (publishCount == 0)
                 _bridge.SetVoodooEnclosureBoxes(null);
             else
                 _bridge.SetVoodooEnclosureBoxes(_boxScratch.ToArray());
@@ -198,13 +222,27 @@ namespace ThreeOS
                 var col = cols[i];
                 if (col == null)
                     continue;
-                if (IsWorldMeshName(col.gameObject.name))
+                if (IsWorldMeshCollider(col))
                     _worldMeshColliders.Add(col);
             }
         }
 
+        private static bool IsWorldMeshCollider(Collider col)
+        {
+            for (var t = col.transform; t != null; t = t.parent)
+            {
+                if (IsWorldMeshName(t.name))
+                    return true;
+            }
+
+            return false;
+        }
+
         /// <summary>
         /// Any GO named WorldMesh, WorldMesh (N), WorldMesh-Ceiling, WorldMesh-Floor, etc.
+        /// Floor/ceiling BoxColliders publish as enclosure OBBs the same way as walls — the
+        /// kernel depenetrates on the min axis (Y for floor/ceiling), so the far BB bottom
+        /// face skates on a Floor OBB and the top face skates on a Ceiling OBB when present.
         /// </summary>
         private static bool IsWorldMeshName(string n)
         {
@@ -212,15 +250,19 @@ namespace ThreeOS
                 return false;
             if (n == WorldMeshPrefix)
                 return true;
-            if (n.StartsWith(WorldMeshPrefix + " (", StringComparison.Ordinal) && n.EndsWith(")"))
+            // "WorldMesh Walls", "WorldMesh (1)", "WorldMesh-Floor", …
+            if (n.StartsWith(WorldMeshPrefix + " ", StringComparison.Ordinal))
                 return true;
             if (n.StartsWith(WorldMeshPrefix + "-", StringComparison.Ordinal))
+                return true;
+            if (n.StartsWith(WorldMeshPrefix + " (", StringComparison.Ordinal))
                 return true;
             return false;
         }
 
         /// <summary>
-        /// Finite OBB for a collider. BoxCollider keeps orientation; others use world AABB.
+        /// Finite OBB for a collider. BoxCollider uses TransformVector axes so non-uniform
+        /// parent scale (e.g. WorldMesh Walls {1.2,0.7,0.31}) still publishes correct extents.
         /// </summary>
         private static bool TryColliderObb(Collider col, out Vector3 center, out Vector3 halfExtents,
             out Quaternion rotation)
@@ -232,12 +274,14 @@ namespace ThreeOS
             {
                 var t = col.transform;
                 center = t.TransformPoint(box.center);
-                rotation = t.rotation;
-                var lossy = t.lossyScale;
-                halfExtents = new Vector3(
-                    Mathf.Abs(box.size.x * lossy.x) * 0.5f,
-                    Mathf.Abs(box.size.y * lossy.y) * 0.5f,
-                    Mathf.Abs(box.size.z * lossy.z) * 0.5f);
+                var ax = t.TransformVector(new Vector3(box.size.x * 0.5f, 0f, 0f));
+                var ay = t.TransformVector(new Vector3(0f, box.size.y * 0.5f, 0f));
+                var az = t.TransformVector(new Vector3(0f, 0f, box.size.z * 0.5f));
+                halfExtents = new Vector3(ax.magnitude, ay.magnitude, az.magnitude);
+                if (az.sqrMagnitude > 1e-8f && ay.sqrMagnitude > 1e-8f)
+                    rotation = Quaternion.LookRotation(az.normalized, ay.normalized);
+                else
+                    rotation = t.rotation;
             }
             else
             {
@@ -261,6 +305,13 @@ namespace ThreeOS
                     viz.LoggedOpen = false;
                 }
 
+                HideHand(viz);
+                return false;
+            }
+
+            var liveSnapDrag = session.nearBb.open == 0 && session.mode == (uint)VoodooMode.Snap;
+            if (liveSnapDrag && _bridge.SoloBlocksVoodooSnap())
+            {
                 HideHand(viz);
                 return false;
             }

@@ -10,23 +10,52 @@ namespace ThreeOS
     public sealed class ThreeOSCentroidDebug : MonoBehaviour
     {
         private ThreeOSBridge _bridge;
+        private ThreeOSStorageController _storage;
         private readonly List<Transform> _markers = new List<Transform>();
         private Material _matMindPalace;
         private Material _matBox;
         private Material _matTemp;
+        private bool _materialsReady;
 
         private void Awake()
         {
             _bridge = GetComponent<ThreeOSBridge>() ?? FindFirstObjectByType<ThreeOSBridge>();
+            _storage = GetComponent<ThreeOSStorageController>() ??
+                       FindFirstObjectByType<ThreeOSStorageController>();
+            EnsureMaterials();
+        }
+
+        private void EnsureMaterials()
+        {
+            if (_materialsReady)
+                return;
             _matMindPalace = MakeMat(new Color(1f, 0.35f, 0.9f, 0.55f));
             _matBox = MakeMat(new Color(0.35f, 0.85f, 1f, 0.55f));
             // Near-portal parent node (center-bottom-center of near BB).
             _matTemp = MakeMat(new Color(0.35f, 0.85f, 1f, 0.75f));
+            _materialsReady = _matMindPalace != null && _matBox != null && _matTemp != null;
         }
 
         private void LateUpdate()
         {
             if (_bridge == null || !_bridge.IsLoaded || _bridge.NativeAbiVersion < 6)
+            {
+                HideAll();
+                return;
+            }
+
+            EnsureMaterials();
+            if (!_materialsReady)
+            {
+                HideAll();
+                return;
+            }
+
+            if (_storage == null)
+                _storage = FindFirstObjectByType<ThreeOSStorageController>();
+            // Palace cluster scale-out (VR→MR): kernel centroids sit at cluster pivots — hide
+            // debug spheres so they are not visible inside shrinking boxes (e.g. DemonProject).
+            if (_storage != null && _storage.PalaceClusterAnimBusy)
             {
                 HideAll();
                 return;
@@ -104,6 +133,14 @@ namespace ThreeOS
                     Destroy(col);
                 }
 
+                var mr = go.GetComponent<MeshRenderer>();
+                if (mr != null && _matMindPalace != null)
+                {
+                    mr.sharedMaterial = _matMindPalace;
+                    mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    mr.receiveShadows = false;
+                }
+
                 go.SetActive(false);
                 _markers.Add(go.transform);
             }
@@ -119,12 +156,18 @@ namespace ThreeOS
 
         private static Material MakeMat(Color c)
         {
-            var shader = Shader.Find("Universal Render Pipeline/Unlit") ??
-                         Shader.Find("Unlit/Color") ??
-                         Shader.Find("Sprites/Default");
+            // Match voodoo wire/snap (Quest URP): never assign a default primitive shader.
+            var shader = Shader.Find("Sprites/Default") ??
+                         Shader.Find("Universal Render Pipeline/Unlit") ??
+                         Shader.Find("Unlit/Color");
+            if (shader == null)
+                return null;
             var mat = new Material(shader);
             mat.color = c;
-            if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", c);
+            if (mat.HasProperty("_Color"))
+                mat.SetColor("_Color", c);
+            if (mat.HasProperty("_BaseColor"))
+                mat.SetColor("_BaseColor", c);
             mat.renderQueue = 3000;
             return mat;
         }

@@ -210,10 +210,21 @@ namespace ThreeOS
                 var col = rays[i].collider;
                 if (col == null)
                     continue;
-                if (!IsWorldMeshName(col.gameObject.name))
+                if (!IsWorldMeshCollider(col))
                     continue;
                 point = rays[i].point;
                 return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsWorldMeshCollider(Collider col)
+        {
+            for (var t = col.transform; t != null; t = t.parent)
+            {
+                if (IsWorldMeshName(t.name))
+                    return true;
             }
 
             return false;
@@ -225,10 +236,36 @@ namespace ThreeOS
                 return false;
             if (n == WorldMeshPrefix)
                 return true;
-            if (n.StartsWith(WorldMeshPrefix + " (", System.StringComparison.Ordinal) &&
-                n.EndsWith(")"))
+            if (n.StartsWith(WorldMeshPrefix + " ", System.StringComparison.Ordinal))
                 return true;
-            return n.StartsWith(WorldMeshPrefix + "-", System.StringComparison.Ordinal);
+            if (n.StartsWith(WorldMeshPrefix + "-", System.StringComparison.Ordinal))
+                return true;
+            if (n.StartsWith(WorldMeshPrefix + " (", System.StringComparison.Ordinal))
+                return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Storage clear resets kernel room bounds + field params; re-publish MR probe when
+        /// WorldMesh enclosure is active again.
+        /// </summary>
+        public void RestoreKernelMrBounds()
+        {
+            if (bridge == null)
+                bridge = FindFirstObjectByType<ThreeOSBridge>();
+            if (bridge == null || !bridge.IsLoaded)
+                return;
+            if (_haveRoom)
+            {
+                ApplyMrFieldAndBounds(_roomBounds);
+                return;
+            }
+
+            if (TryProbeRoom(out _roomBounds))
+            {
+                _haveRoom = true;
+                ApplyMrFieldAndBounds(_roomBounds);
+            }
         }
 
         private void OnDrawGizmosSelected()

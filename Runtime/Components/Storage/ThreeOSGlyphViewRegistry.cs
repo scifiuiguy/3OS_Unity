@@ -898,7 +898,7 @@ namespace ThreeOS
                 // Overwriting from workspace here caused post-release snaps to a stale layout pose.
                 // Expand/collapse / MR-carry anim-lock also owns pose until cleared.
                 var kineticDriven = _host.IsKinematicallyDriven(item.entityId);
-                if (!kineticDriven && !animLocked)
+                if (!kineticDriven && !animLocked && !_host.ShouldSkipKernelViewPoseSync(item.entityId))
                 {
                     // Soft-dismissed MR carry: never write palace/workspace pose over the office
                     // anchor — MR always takes precedence until the user telekinesis-moves it.
@@ -973,9 +973,14 @@ namespace ThreeOS
                 _ghostViews.Remove(key);
             }
         }
+        readonly HashSet<ulong> _selSet = new HashSet<ulong>();
+
         internal void SyncSelectionMaterials()
         {
             _bridge.TryGetSelection(out var selectedId);
+            _selSet.Clear();
+            var selN = _bridge.GetSelectionIds(out var selIds);
+            for (var i = 0; i < selN; i++) _selSet.Add(selIds[i]);
             if (selectedId == 0)
             {
                 _selectionLabel = "none";
@@ -1015,7 +1020,7 @@ namespace ThreeOS
                 return;
             }
 
-            var abiSelected = selectedId != 0 && entityId == selectedId;
+            var abiSelected = (selectedId != 0 && entityId == selectedId) || _selSet.Contains(entityId);
             var blueHover = blueChildren != null && blueChildren.Contains(entityId);
             var selectedOrHover = abiSelected || blueHover;
             var owned = view.OwnsMaterial ? view.Material : null;

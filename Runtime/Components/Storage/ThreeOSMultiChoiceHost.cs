@@ -214,6 +214,11 @@ namespace ThreeOS
             if (!rising)
                 return;
 
+            // Final Demo: drive / folder Multi-Choice is out of the reel — suppress false opens
+            // from palm-up secondary in MindPalace (Dismiss All still works via kernel).
+            if (IsFinalDemoScene())
+                return;
+
             // Palm-up + secondary is also Voodoo Dismiss / Dismiss All. Core runs
             // dismiss in threeos_tick; skip Multi-Choice when that gesture consumed.
             if (Bridge.VoodooDismissGestureResult != 0)
@@ -237,6 +242,17 @@ namespace ThreeOS
             {
                 Bridge.OpenMultiChoiceDrive(hand, center);
             }
+        }
+
+        static bool IsFinalDemoScene()
+        {
+            foreach (var mb in UnityEngine.Object.FindObjectsByType<MonoBehaviour>(
+                         FindObjectsInactive.Exclude, FindObjectsSortMode.None))
+            {
+                if (mb != null && mb.GetType().Name == "ThreeOSFinalDemoStage")
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>

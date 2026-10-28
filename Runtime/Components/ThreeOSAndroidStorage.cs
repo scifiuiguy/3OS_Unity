@@ -118,14 +118,77 @@ namespace ThreeOS
             return false;
         }
 
-        /// <summary>
-        /// Last-resort same as adb shell mv — proven to relocate Quest Documents folders when
-        /// Java NIO/renameTo fail from Unity JNI. Uses ProcessBuilder (Runtime.exec(String[])
-        /// often binds the wrong overload under IL2CPP).
-        /// </summary>
-        public static bool ShellMv(string src, string dst)
+        internal static string NormalizeAndroidPath(string path) =>
+            string.IsNullOrEmpty(path) ? path : path.Replace('\\', '/').TrimEnd('/');
+
+        static string ShellQuote(string path) => "'" + path.Replace("'", "'\\''") + "'";
+
+        /// <summary>Run <paramref name="script"/> under /system/bin/sh -c; returns waitFor exit code.</summary>
+        static int RunShellScript(string script)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
+            using var list = new AndroidJavaObject("java.util.ArrayList");
+            list.Call<bool>("add", "/system/bin/sh");
+            list.Call<bool>("add", "-c");
+            list.Call<bool>("add", script);
+            using var pb = new AndroidJavaObject("java.lang.ProcessBuilder", list);
+            pb.Call<AndroidJavaObject>("redirectErrorStream", true);
+            using var proc = pb.Call<AndroidJavaObject>("start");
+            return proc.Call<int>("waitFor");
+#else
+            return -1;
+#endif
+        }
+
+        /// <summary>
+        /// rename(2) / mv only work within one volume. App-private ↔ Documents needs copy+delete.
+        /// </summary>
+        public static bool SameVolumeForRename(string src, string dst)
+        {
+            var s = NormalizeAndroidPath(src);
+            var d = NormalizeAndroidPath(dst);
+            if (string.IsNullOrEmpty(s) || string.IsNullOrEmpty(d))
+                return false;
+
+            static bool IsAppPrivate(string p) =>
+                p.IndexOf("/Android/data/", StringComparison.Ordinal) >= 0 ||
+                p.StartsWith("/data/data/", StringComparison.Ordinal);
+
+            var sApp = IsAppPrivate(s);
+            var dApp = IsAppPrivate(d);
+            if (sApp != dApp)
+                return false;
+            if (sApp)
+                return true;
+
+            static string VolumeKey(string p)
+            {
+                if (p.StartsWith("/storage/emulated/", StringComparison.Ordinal))
+                {
+                    var parts = p.Split('/');
+                    return parts.Length >= 4 ? $"/storage/emulated/{parts[3]}" : "/storage/emulated/0";
+                }
+
+                const string prefix = "/storage/";
+                var idx = p.IndexOf(prefix, StringComparison.Ordinal);
+                if (idx < 0)
+                    return p;
+                var rest = p.Substring(idx + prefix.Length);
+                var slash = rest.IndexOf('/');
+                return slash >= 0 ? $"/storage/{rest.Substring(0, slash)}" : $"/storage/{rest}";
+            }
+
+            return string.Equals(VolumeKey(s), VolumeKey(d), StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Recursive copy via toybox <c>cp -a</c> (much faster than per-file JNI on large trees).
+        /// </summary>
+        public static bool ShellCpTree(string src, string dst)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            src = NormalizeAndroidPath(src);
+            dst = NormalizeAndroidPath(dst);
             if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(dst))
                 return false;
             try
@@ -134,27 +197,61 @@ namespace ThreeOS
                 using var parent = dstFile.Call<AndroidJavaObject>("getParentFile");
                 parent?.Call<bool>("mkdirs");
 
-                var quotedSrc = "'" + src.Replace("'", "'\\''") + "'";
-                var quotedDst = "'" + dst.Replace("'", "'\\''") + "'";
-                var script = "mv -f -- " + quotedSrc + " " + quotedDst;
-                using var list = new AndroidJavaObject("java.util.ArrayList");
-                list.Call<bool>("add", "/system/bin/sh");
-                list.Call<bool>("add", "-c");
-                list.Call<bool>("add", script);
-                using var pb = new AndroidJavaObject("java.lang.ProcessBuilder", list);
-                pb.Call<AndroidJavaObject>("redirectErrorStream", true);
-                using var proc = pb.Call<AndroidJavaObject>("start");
-                var exit = proc.Call<int>("waitFor");
+                var parentPath = NormalizeAndroidPath(Path.GetDirectoryName(dst));
+                var script = "mkdir -p " + ShellQuote(parentPath) + " && cp -a " + ShellQuote(src) + " " +
+                             ShellQuote(dst);
+                var exit = RunShellScript(script);
+                if (exit == 0 && Exists(dst))
+                {
+                    Debug.Log($"[3OS] ShellCpTree OK {src} → {dst}");
+                    AppendPasteFsLog($"ShellCpTree OK {src} → {dst}");
+                    return true;
+                }
+
+                AppendPasteFsLog($"ShellCpTree exit={exit} dstExists={Exists(dst)}");
+                Debug.LogWarning($"[3OS] ShellCpTree exit={exit} {src} → {dst}");
+            }
+            catch (System.Exception ex)
+            {
+                AppendPasteFsLog($"ShellCpTree ex={ex.Message}");
+                Debug.LogWarning($"[3OS] ShellCpTree: {ex.Message}");
+            }
+#endif
+            return false;
+        }
+
+        /// <summary>
+        /// Last-resort same as adb shell mv — proven to relocate Quest Documents folders when
+        /// Java NIO/renameTo fail from Unity JNI. Uses ProcessBuilder (Runtime.exec(String[])
+        /// often binds the wrong overload under IL2CPP).
+        /// </summary>
+        public static bool ShellMv(string src, string dst)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            src = NormalizeAndroidPath(src);
+            dst = NormalizeAndroidPath(dst);
+            if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(dst))
+                return false;
+            try
+            {
+                using var dstFile = new AndroidJavaObject("java.io.File", dst);
+                using var parent = dstFile.Call<AndroidJavaObject>("getParentFile");
+                parent?.Call<bool>("mkdirs");
+
+                var script = "mv -f -- " + ShellQuote(src) + " " + ShellQuote(dst);
+                var exit = RunShellScript(script);
                 if (exit == 0 && Exists(dst))
                 {
                     Debug.Log($"[3OS] ShellMv OK {src} → {dst}");
                     return true;
                 }
 
+                AppendPasteFsLog($"ShellMv exit={exit} dstExists={Exists(dst)}");
                 Debug.LogWarning($"[3OS] ShellMv exit={exit} {src} → {dst}");
             }
             catch (System.Exception ex)
             {
+                AppendPasteFsLog($"ShellMv ex={ex.Message}");
                 Debug.LogWarning($"[3OS] ShellMv: {ex.Message}");
             }
 #endif
@@ -415,7 +512,7 @@ namespace ThreeOS
         /// Recursive directory copy via java.io.File (main thread). Used when rename/move fails
         /// on MTP-staged Documents folders.
         /// </summary>
-        public static bool JavaCopyDirectory(string src, string dst)
+        public static bool JavaCopyDirectory(string src, string dst, System.Action onLeafCopied = null)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (string.IsNullOrEmpty(src) || string.IsNullOrEmpty(dst))
@@ -445,12 +542,11 @@ namespace ThreeOS
                         var childDst = Path.Combine(dst, name);
                         if (child.Call<bool>("isDirectory"))
                         {
-                            if (!JavaCopyDirectory(child.Call<string>("getAbsolutePath"), childDst))
+                            if (!JavaCopyDirectory(child.Call<string>("getAbsolutePath"), childDst, onLeafCopied))
                                 return false;
                         }
                         else
                         {
-                            using var outFile = new AndroidJavaObject("java.io.File", childDst);
                             using var filesCls = new AndroidJavaClass("java.nio.file.Files");
                             using var paths = new AndroidJavaClass("java.nio.file.Paths");
                             var emptyMore = new string[0];
@@ -461,6 +557,7 @@ namespace ThreeOS
                             using var replace = optionCls.GetStatic<AndroidJavaObject>("REPLACE_EXISTING");
                             var opts = new AndroidJavaObject[] { replace };
                             filesCls.CallStatic<AndroidJavaObject>("copy", sp, dp, opts);
+                            onLeafCopied?.Invoke();
                         }
                     }
                 }
