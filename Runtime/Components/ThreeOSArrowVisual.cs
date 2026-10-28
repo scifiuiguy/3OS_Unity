@@ -7,6 +7,12 @@ namespace ThreeOS
     /// </summary>
     public sealed class ThreeOSArrowVisual
     {
+        /// <summary>~1" gap between arrow tip and live cursor (README telekinesis viz).</summary>
+        public const float TipClearanceM = 0.0254f;
+        /// <summary>Below this anchor→cursor separation, show anchor dot only.</summary>
+        public const float DotOnlyMaxM = 0.002f;
+        const float AnchorDotDiameterM = 0.012f;
+
         private readonly LineRenderer _shaft;
         private readonly LineRenderer _ghostLine;
         private readonly Transform _head;
@@ -142,22 +148,31 @@ namespace ThreeOS
             HideDeadzone();
             var delta = to - from;
             var len = delta.magnitude;
-            if (len < 1e-4f)
+            if (len < DotOnlyMaxM)
             {
-                HideArrow();
+                ShowAnchorDot(from, color);
                 return;
             }
 
             var dir = delta / len;
-            var headLen = Mathf.Clamp(len * 0.4f, 0.012f, 0.032f);
-            var headRad = headLen * 0.42f;
-            if (headLen > len * 0.85f)
+            var clearance = Mathf.Min(TipClearanceM, len * 0.45f);
+            var visualTip = to - dir * clearance;
+            var visualLen = (visualTip - from).magnitude;
+            if (visualLen < DotOnlyMaxM)
             {
-                headLen = len * 0.85f;
+                ShowAnchorDot(from, color);
+                return;
+            }
+
+            var headLen = Mathf.Clamp(visualLen * 0.4f, 0.012f, 0.032f);
+            var headRad = headLen * 0.42f;
+            if (headLen > visualLen * 0.85f)
+            {
+                headLen = visualLen * 0.85f;
                 headRad = headLen * 0.42f;
             }
 
-            var shaftEnd = to - dir * headLen;
+            var shaftEnd = visualTip - dir * headLen;
             ApplyColor(color);
 
             _shaft.enabled = true;
@@ -168,7 +183,7 @@ namespace ThreeOS
             _shaft.widthMultiplier = Mathf.Clamp(headRad * 0.55f, 0.004f, 0.012f);
 
             _head.gameObject.SetActive(true);
-            _head.position = to;
+            _head.position = visualTip;
             _head.rotation = Quaternion.FromToRotation(Vector3.up, dir);
             _head.localScale = new Vector3(headRad / 0.5f, headLen, headRad / 0.5f);
             if (_headRenderer != null)
@@ -219,10 +234,46 @@ namespace ThreeOS
             _ghostLine.enabled = true;
             _ghostLine.positionCount = 2;
             _ghostLine.SetPosition(0, from);
-            _ghostLine.SetPosition(1, to);
+            var delta = to - from;
+            var len = delta.magnitude;
+            if (len > TipClearanceM)
+            {
+                var dir = delta / len;
+                _ghostLine.SetPosition(1, to - dir * TipClearanceM);
+            }
+            else
+            {
+                _ghostLine.SetPosition(1, to);
+            }
             _ghostLine.startColor = _ghostLine.endColor = ghostColor;
             _ghostLine.widthMultiplier = 0.0025f;
             _ghostLine.sortingOrder = 20;
+        }
+
+        void ShowAnchorDot(Vector3 anchor, Color color)
+        {
+            HideArrow();
+            if (_deadzoneSphere == null)
+            {
+                return;
+            }
+
+            _deadzoneSphere.gameObject.SetActive(true);
+            _deadzoneSphere.position = anchor;
+            _deadzoneSphere.localScale = Vector3.one * AnchorDotDiameterM;
+            if (_sphereMaterial != null)
+            {
+                ApplyColor(color);
+                var c = color;
+                c.a = Mathf.Max(c.a, 0.85f);
+                ApplyTransparentColor(_sphereMaterial, c);
+            }
+
+            if (_sphereRenderer != null)
+            {
+                _sphereRenderer.enabled = true;
+                _sphereRenderer.sharedMaterial = _sphereMaterial;
+            }
         }
 
         public void Hide()
